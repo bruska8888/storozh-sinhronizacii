@@ -67,6 +67,22 @@ struct State: Codable {
 }
 
 func stateURL(_ app: String) -> URL { stateDir.appendingPathComponent("\(app).json") }
+
+// Настройки: за какими программами следить / settings: which apps to watch
+let watchURL = stateDir.appendingPathComponent("settings.json")
+func isInstalled(_ app: String) -> Bool {
+    FileManager.default.fileExists(atPath: "/Applications/\(app).app")
+        || FileManager.default.fileExists(atPath: home.appendingPathComponent("Applications/\(app).app").path)
+}
+func loadWatch() -> [String: Bool] {
+    guard let d = try? Data(contentsOf: watchURL), let w = try? JSONDecoder().decode([String: Bool].self, from: d) else { return [:] }
+    return w
+}
+func saveWatch(_ w: [String: Bool]) {
+    try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
+    if let d = try? JSONEncoder().encode(w) { try? d.write(to: watchURL) }
+}
+func isWatched(_ app: String) -> Bool { loadWatch()[app] ?? true }   // по умолчанию — следить
 func loadState(_ app: String) -> State {
     guard let d = try? Data(contentsOf: stateURL(app)),
           let s = try? JSONDecoder().decode(State.self, from: d) else { return State() }
@@ -178,7 +194,12 @@ func runCheck() {
     migrateOldFiles()
 
     for app in APPS {
-        guard FileManager.default.fileExists(atPath: "/Applications/\(app).app") else { continue }
+        guard isInstalled(app) else { continue }
+        guard isWatched(app) else {
+            report.append(L("\(app): не слежу — выключено галочкой", "\(app): not watched — unchecked in settings"))
+            try? FileManager.default.removeItem(at: stateURL(app))
+            continue
+        }
 
         guard let r = running(app) else {
             launch(app)
@@ -251,11 +272,41 @@ func runCheck() {
 let LABEL = "com.anton.storozh-sinhronizacii"
 let agent = SMAppService.agent(plistName: "\(LABEL).plist")
 
+// Галочки «следить за …» / watch checkboxes
+var showWatchBoxes = false
+func watchBoxesView() -> (NSView, () -> Void) {
+    let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 6
+    var boxes: [(String, NSButton)] = []
+    for app in APPS {
+        let inst = isInstalled(app)
+        let title = L("Следить за \(app)", "Watch \(app)") + (inst ? "" : L(" (не установлен)", " (not installed)"))
+        let b = NSButton(checkboxWithTitle: title, target: nil, action: nil)
+        b.state = isWatched(app) ? .on : .off
+        b.isEnabled = inst
+        stack.addArrangedSubview(b); boxes.append((app, b))
+    }
+    let hint = NSTextField(wrappingLabelWithString: L("Снимите галочку, если держите программу выключенной специально — сторож не будет её запускать.",
+                                                      "Uncheck an app you keep closed on purpose — the watchdog will not launch it."))
+    hint.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize); hint.textColor = .secondaryLabelColor
+    hint.preferredMaxLayoutWidth = 260
+    stack.addArrangedSubview(hint)
+    stack.frame = NSRect(x: 0, y: 0, width: 270, height: stack.fittingSize.height)
+    let save = {
+        var w = loadWatch()
+        for (app, b) in boxes where b.isEnabled { w[app] = (b.state == .on) }
+        saveWatch(w)
+    }
+    return (stack, save)
+}
+
 @discardableResult
 func alert(_ title: String, _ text: String, _ buttons: [String] = ["OK"]) -> Int {
     let a = NSAlert()
     a.messageText = title; a.informativeText = text
     for b in buttons { a.addButton(withTitle: b) }
+    var saveBoxes: (() -> Void)? = nil
+    if showWatchBoxes { let (v, sv) = watchBoxesView(); a.accessoryView = v; saveBoxes = sv }
+    defer { saveBoxes?() }
     a.window.level = .floating              // не прятаться за другими окнами / stay on top
     NSApp.activate(ignoringOtherApps: true)
     return a.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
@@ -311,6 +362,7 @@ func runInstaller() {
         let access = AXIsProcessTrusted() ? "" :
             L("\n\n⚠️ Нет разрешения «Универсальный доступ» — зависания не видны.",
               "\n\n⚠️ No Accessibility permission — hangs cannot be detected.")
+        showWatchBoxes = true
         let r = alert(title, L("Сторож включён и работает в фоне, окон не показывает. Раз в 10 минут он проверяет OneDrive и Dropbox и перезапускает их, если они закрылись или зависли.",
                                "The watchdog is on and works in the background without windows. Every 10 minutes it checks OneDrive and Dropbox and restarts them if they quit or hang.")
                       + access + "\n\n" + lastCheckText(),
@@ -322,6 +374,7 @@ func runInstaller() {
             }
             NSWorkspace.shared.open(logURL)
         } else if r == 2 {
+            showWatchBoxes = false
             try? agent.unregister()
             alert(title, L("Сторож выключен. Теперь перетащите приложение в Корзину и удалите его из «Универсального доступа».",
                            "The watchdog is turned off. Now drag the app to the Trash and remove it from Accessibility."))
@@ -336,6 +389,7 @@ func runInstaller() {
                        "macOS asks to allow background activity. In Login Items, turn on “Sync Watchdog”."))
         SMAppService.openSystemSettingsLoginItems()
     }
+    showWatchBoxes = true
     if AXIsProcessTrusted() {
         alert(title, L("Готово. Сторож будет проверять OneDrive и Dropbox раз в 10 минут.",
                        "Done. The watchdog will check OneDrive and Dropbox every 10 minutes."))

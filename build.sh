@@ -11,7 +11,9 @@ APP="build/$NAME.app"
 
 rm -rf build && mkdir -p build dist
 swiftc -O -target arm64-apple-macos13 -o build/bin-arm64 Sources/main.swift
-swiftc -O -target x86_64-apple-macos13 -o build/bin-x86_64 Sources/main.swift
+# Intel: CLT печатает «libswiftCompatibilityPacks.a … missing arch x86_64» — безвредно,
+# программа ни одного символа из этой библиотеки не использует (проверено nm, 17.11.2026).
+swiftc -O -target x86_64-apple-macos13 -o build/bin-x86_64 Sources/main.swift 2> >(grep -v libswiftCompatibilityPacks >&2)
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Library/LaunchAgents"
 lipo -create -output "$APP/Contents/MacOS/SyncWatchdog" build/bin-arm64 build/bin-x86_64
 cp Resources/Info.plist "$APP/Contents/Info.plist"

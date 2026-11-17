@@ -2,6 +2,10 @@
 
 **English** | [Русский](CHANGELOG.ru.md)
 
+## 1.2 — 2026-11-17
+- **Watch OneDrive / Watch Dropbox** checkboxes in the app window. Uncheck an app you keep closed on purpose, and the watchdog will not launch it. Apps that are not installed are skipped automatically.
+- Intel Macs: tested under Rosetta (status reading, simulated hang, restart).
+
 ## 1.1 — 2026-11-17
 - One-file installation: download the `.dmg`, drag the app into Applications, open it. The app schedules itself and asks for permissions. No Terminal needed.
 - Starts automatically after a restart (listed in Login Items → Allow in the Background).

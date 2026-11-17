@@ -6,7 +6,7 @@
 
 After the Mac wakes up, OneDrive and Dropbox often quietly stop syncing. Sometimes the app quits during a self-update while the Mac is asleep. Sometimes it is still open, but uploading is stuck for hours on "Uploading files (2%)" or "Connecting...". You only find out when a file is missing on another computer.
 
-Sync Watchdog checks both apps every 10 minutes in the background. If an app has quit, it starts it again. If an app is stuck, it restarts it once. If that doesn't help, it shows you a notification.
+Sync Watchdog checks both apps every 10 minutes in the background. It is fine to have only one of them installed. If an app has quit, it starts it again. If an app is stuck, it restarts it once. If that doesn't help, it shows you a notification.
 
 ---
 
@@ -42,6 +42,7 @@ Sync Watchdog has no windows and no menu bar icon. To see what it is doing, open
 
 - whether it is running;
 - the result of the last check, for example *OneDrive — OK*;
+- **Watch OneDrive** and **Watch Dropbox** checkboxes. If you keep one of them closed on purpose, uncheck it and the watchdog will leave it alone. If only one of the apps is installed, the other one is simply skipped;
 - **Open log**: the history of everything it has done (launches, restarts, warnings);
 - **Uninstall**: turns the watchdog off. After that, drag the app to the Trash.
 
@@ -79,13 +80,13 @@ Everything is stored on your Mac. Nothing is sent anywhere, and no cloud or acco
 | App | `/Applications/Sync Watchdog.app` |
 | Last check (overwritten every run) | `~/Library/Logs/Sync Watchdog/last-check.txt` |
 | Log of actions (written only when it does something) | `~/Library/Logs/Sync Watchdog/journal.log` |
-| State between runs | `~/Library/Application Support/Sync Watchdog/` |
+| Settings and state between runs | `~/Library/Application Support/Sync Watchdog/` |
 
 The log can also be opened in the **Console** app: *Log Reports → Sync Watchdog*.
 
 ### Requirements
 
-macOS 13 Ventura or newer. Apple Silicon and Intel (the Intel build has not been tested).
+macOS 13 Ventura or newer. Apple Silicon and Intel (the Intel build is tested under Rosetta, not yet on a real Intel Mac).
 
 ---
 
@@ -114,5 +115,7 @@ for i in 1 2 3 4 5; do FAKE_Dropbox="Dropbox Connecting..." STOROZH_VERBOSE=1 "$
 ```
 
 On the 5th run Dropbox really restarts. Four more runs give the "stuck again" notification. A normal run resets the episode.
+
+Windows version: work in progress, see [`windows/SPEC.ru.md`](windows/SPEC.ru.md).
 
 Settings in `Sources/main.swift`: `APPS` (which apps to check), `POROG` (how many checks without change count as a hang), `classify()` (which status words mean busy, paused, or OK, in Russian and English).
