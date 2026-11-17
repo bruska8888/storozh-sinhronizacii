@@ -1,105 +1,105 @@
-# Сторож синхронизации (Sync Watchdog) для macOS
+# Sync Watchdog (Сторож синхронизации) for macOS
 
-Маленькое фоновое приложение. Следит, чтобы **OneDrive** и **Dropbox** на Маке не просто были запущены, а действительно синхронизировали файлы.
+**English** | [Русский](README.ru.md)
 
-## Зачем
+A tiny background app. It makes sure **OneDrive** and **Dropbox** on a Mac are actually syncing files, not just running.
 
-OneDrive и Dropbox иногда ломаются двумя способами:
+## Why
 
-1. **Закрываются** — чаще всего при самообновлении, пока Мак спит.
-2. **Висят живыми**: программа запущена, а отправка стоит. В меню при этом часами висит «Отправка файлов (2%)» или «Соединение...».
+OneDrive and Dropbox sometimes fail in two ways:
 
-Проверка «запущен ли процесс» ловит только первый случай. Сторож ловит оба.
+1. **They quit.** This usually happens during a self-update while the Mac is asleep.
+2. **They hang while still running.** The app is open, but uploading has stopped. The menu shows "Uploading files (2%)" or "Connecting..." for hours.
 
-## Как работает
+A "is the process running?" check only catches the first case. The watchdog catches both.
 
-macOS (`launchd`) запускает сторожа раз в 10 минут. Он делает одну проверку за долю секунды и выходит. Окон и значков у него нет.
+## How it works
 
-| Что видит | Что делает |
+macOS (`launchd`) starts the watchdog every 10 minutes. It runs one check in a fraction of a second and exits. It has no windows and no icons.
+
+| What it sees | What it does |
 |---|---|
-| OneDrive/Dropbox не запущен | Запускает в фоне |
-| Статус «Выполнено…» / «Обновлено» | Ничего |
-| «Отправка…», «Соединение…», «Синхронизация…», и текст меняется | Ничего, работа идёт |
-| Тот же текст «Отправка…» / «Соединение…» **4 проверки подряд (~40 мин)** | Проверяет интернет, затем **один раз** штатно перезапускает только этот клиент |
-| После перезапуска снова завис так же | Уведомление на экране + запись в журнал, больше не трогает, пока статус не сменится |
-| Пауза, нет сети, нужен вход | Ничего |
+| OneDrive/Dropbox is not running | Launches it in the background |
+| Status "Up to date" (Выполнено… / Обновлено) | Nothing |
+| "Uploading…", "Connecting…", "Syncing…", and the text keeps changing | Nothing, work is in progress |
+| The same "Uploading…" / "Connecting…" text for **4 checks in a row (~40 min)** | Checks the internet connection, then restarts **only that client, once**, with a normal quit |
+| Stuck the same way again after the restart | Shows a notification and writes to the log. Leaves the client alone until its status changes |
+| Paused, offline, or sign-in required | Nothing |
 
-Статус берётся из текста значка в строке меню: это та же подсказка, что видна при наведении мыши. Сторож читает её через Accessibility API. Поэтому ему нужно разрешение «Универсальный доступ».
+The status comes from the text of the menu bar icon. It is the same tooltip you see when you hover the mouse over it. The watchdog reads it through the Accessibility API, so it needs the Accessibility permission.
 
-Нагрузка почти нулевая: два коротких запроса к значкам раз в 10 минут. Файлы сторож не перебирает и в сеть не ходит, кроме одной проверки интернета перед перезапуском.
+The load is close to zero: two short queries to the icons every 10 minutes. It never scans files and makes no network requests, except one internet check before a restart.
 
-## Файлы на Маке
+## Files on the Mac
 
-| Что | Где |
+| What | Where |
 |---|---|
-| Приложение | `~/Applications/Сторож синхронизации.app` |
-| Расписание (раз в 10 мин) | `~/Library/LaunchAgents/com.anton.storozh-sinhronizacii.plist` |
-| **Последняя проверка** (перезаписывается каждый запуск) | `~/Library/Logs/storozh_sinhronizacii_status.txt` |
-| **Журнал действий** (только когда что-то сделал) | `~/Library/Logs/storozh_sinhronizacii.log` |
-| Состояние между запусками | `~/Library/Application Support/storozh-sinhronizacii/*.json` |
+| App | `~/Applications/Сторож синхронизации.app` |
+| Schedule (every 10 min) | `~/Library/LaunchAgents/com.anton.storozh-sinhronizacii.plist` |
+| **Last check** (overwritten on every run) | `~/Library/Logs/storozh_sinhronizacii_status.txt` |
+| **Action log** (written only when it does something) | `~/Library/Logs/storozh_sinhronizacii.log` |
+| State between runs | `~/Library/Application Support/storozh-sinhronizacii/*.json` |
 
-## Установка (новый Мак или переустановка)
+## Installation (new Mac or reinstall)
 
-Нужны Command Line Tools от Apple: `xcode-select --install`. Xcode целиком не нужен.
+You need Apple Command Line Tools: `xcode-select --install`. Full Xcode is not required.
 
 ```bash
-cd путь/к/storozh-sinhronizacii
+cd path/to/storozh-sinhronizacii
 ./install.sh
 ```
 
-Скрипт:
+The script:
 
-1. собирает приложение из `Sources/main.swift`;
-2. кладёт его в `~/Applications`;
-3. подписывает его сертификатом «Apple Development», если он есть в связке ключей, иначе временной подписью;
-4. ставит задачу launchd и сразу её запускает;
-5. вызывает системный запрос доступа.
+1. builds the app from `Sources/main.swift`;
+2. puts it into `~/Applications`;
+3. signs it with an "Apple Development" certificate if one is in the keychain, otherwise with an ad-hoc signature;
+4. installs the launchd job and runs it right away;
+5. shows the system permission prompt.
 
-После этого: **Системные настройки → Конфиденциальность и безопасность → Универсальный доступ → включить «Сторож синхронизации»**.
+Then go to **System Settings → Privacy & Security → Accessibility → turn on "Сторож синхронизации"**.
 
-Проверить, что всё работает:
+To check that everything works:
 
 ```bash
 cat ~/Library/Logs/storozh_sinhronizacii_status.txt
 ```
 
-Строка «НЕТ ДОСТУПА» означает, что разрешение не выдано.
+A line with "НЕТ ДОСТУПА" (no access) means the permission has not been granted.
 
-### Пересборка после правок
+### Rebuilding after changes
 
 ```bash
 ./install.sh --no-ask
 ```
 
-Если приложение подписано сертификатом Apple Development, разрешение сохраняется. При временной подписи macOS сбрасывает разрешение после каждой пересборки: запись нужно удалить «−» в «Универсальном доступе», запустить `./install.sh` и включить переключатель снова. Бывает, что переключатель включён, а доступа нет. Тогда помогает то же самое: удалить «−» и добавить заново.
+If the app is signed with an Apple Development certificate, the permission is kept. With an ad-hoc signature, macOS resets the permission after every rebuild. Remove the entry with "−" in Accessibility, run `./install.sh`, and turn the switch on again. Sometimes the switch is on but access still doesn't work. The same fix applies: remove it with "−" and add it again.
 
-## Проверка без настоящего зависания
+## Testing without a real hang
 
-Переменная `FAKE_<клиент>` подменяет статус:
+The `FAKE_<client>` variable overrides the status:
 
 ```bash
 B=~/Applications/Сторож\ синхронизации.app/Contents/MacOS/storozh
 for i in 1 2 3 4 5; do FAKE_Dropbox="Dropbox Соединение..." STOROZH_VERBOSE=1 "$B"; done
 ```
 
-На 5-м запуске Dropbox по-настоящему перезапустится. Ещё 4 запуска дадут уведомление «снова завис». Обычный запуск без `FAKE_` сбрасывает эпизод. Во время такого теста файл «последней проверки» не перезаписывается.
+On the 5th run Dropbox really restarts. Four more runs give the "stuck again" notification. A normal run without `FAKE_` resets the episode. The "last check" file is not overwritten during such a test.
 
-## Выключить / удалить
+## Turn off / uninstall
 
 ```bash
 launchctl bootout gui/$(id -u)/com.anton.storozh-sinhronizacii
 ```
 
-Затем удалить приложение, plist и запись в «Универсальном доступе».
+Then delete the app, the plist, and the Accessibility entry.
 
-## Настройки в коде
+## Settings in the code
 
-В `Sources/main.swift`:
+In `Sources/main.swift`:
 
-- `APPS` — какие клиенты проверять;
-- `POROG` — сколько проверок без изменений считается зависанием;
-- `classify()` — какие слова статуса означают «занят», «пауза» и «в порядке» (русские и английские).
+- `APPS` — which clients to check;
+- `POROG` — how many checks without change count as a hang;
+- `classify()` — which status words mean "busy", "paused" and "fine" (Russian and English).
 
----
-
-*English summary:* a tiny background macOS app run by launchd every 10 minutes. It relaunches OneDrive/Dropbox if they quit. If a client is alive but its menu bar status ("Uploading…", "Connecting…") hasn't changed for ~40 minutes, it restarts that client once, and notifies you if the client gets stuck again. It needs the Accessibility permission. Install with `./install.sh`.
+Log and "last check" messages are written in Russian. Notifications and the app name follow the system language (Russian or English).
