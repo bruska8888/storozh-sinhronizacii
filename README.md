@@ -99,7 +99,9 @@ Build from source (needs Apple Command Line Tools, `xcode-select --install`; ful
 ./install.sh    # build, copy to /Applications and open
 ```
 
-`build.sh` signs the app with an "Apple Development" certificate if the keychain has one. Then the Accessibility permission survives rebuilds. Otherwise it uses an ad-hoc signature, and the permission has to be granted again after every rebuild. If the switch is on but access does not work, remove the app from the Accessibility list with "−" and open the app again.
+`build.sh` signs the app with a self-signed certificate named "Sync Watchdog" if the keychain has one, so the Accessibility permission survives updates. Otherwise it uses an ad-hoc signature, and the permission has to be granted again after every rebuild. Do not sign with a personal "Apple Development" certificate: it contains the owner's email address. `build.sh` stops if it finds an email address in the signature. If the switch is on but access does not work, remove the app from the Accessibility list with "−" and open the app again.
+
+The schedule is a regular LaunchAgent (`~/Library/LaunchAgents/com.anton.storozh-sinhronizacii.plist`) that the app writes itself when opened. Apple's newer `SMAppService` API was tried in 1.1–1.2, but launchd starts such agents only for apps signed by Apple-issued certificates.
 
 Diagnostics:
 

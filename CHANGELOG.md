@@ -2,6 +2,11 @@
 
 **English** | [Русский](CHANGELOG.ru.md)
 
+## 1.3 — 2026-11-17
+- The app is signed with a neutral "Sync Watchdog" certificate. No personal data in the signature.
+- The schedule is a regular LaunchAgent written by the app, instead of `SMAppService`, which launchd refuses to start without an Apple-issued signature. Now the watchdog really runs on any Mac.
+- After updating from 1.1–1.2, open the app once and turn Accessibility on again (the signature has changed).
+
 ## 1.2 — 2026-11-17
 - **Watch OneDrive / Watch Dropbox** checkboxes in the app window. Uncheck an app you keep closed on purpose, and the watchdog will not launch it. Apps that are not installed are skipped automatically.
 - Intel Macs: tested under Rosetta (status reading, simulated hang, restart).

@@ -270,7 +270,52 @@ func runCheck() {
 // MARK: - Установщик (двойной щелчок по приложению)
 
 let LABEL = "com.anton.storozh-sinhronizacii"
-let agent = SMAppService.agent(plistName: "\(LABEL).plist")
+// Расписание — обычный LaunchAgent в ~/Library/LaunchAgents, его пишет само приложение.
+// SMAppService (1.1–1.2) отказался: launchd запускает такие агенты только с подписью Apple
+// (Developer ID / Apple Development), а с самоподписанной и временной — «spawn failed / CODESIGNING».
+// Schedule = plain LaunchAgent written by the app (SMAppService agents need an Apple-issued signature).
+let agent = SMAppService.agent(plistName: "\(LABEL).plist")   // только чтобы снять запись 1.1–1.2
+let plistURL = home.appendingPathComponent("Library/LaunchAgents/\(LABEL).plist")
+let domain = "gui/\(getuid())"
+
+func isScheduled() -> Bool {
+    FileManager.default.fileExists(atPath: plistURL.path) && run("/bin/launchctl", ["print", "\(domain)/\(LABEL)"]) == 0
+}
+
+struct ScheduleError: Error, LocalizedError {
+    let msg: String
+    var errorDescription: String? { msg }
+}
+
+func schedule() throws {
+    if agent.status == .enabled || agent.status == .requiresApproval { try? agent.unregister() }
+    run("/bin/launchctl", ["bootout", "\(domain)/\(LABEL)"])
+    guard let exe = Bundle.main.executablePath else { throw ScheduleError(msg: "no executable path") }
+    let job: [String: Any] = [
+        "Label": LABEL,
+        "ProgramArguments": [exe, "--check"],
+        "EnvironmentVariables": ["STOROZH_MODE": "check"],
+        "RunAtLoad": true,
+        "StartInterval": 600,
+        "ProcessType": "Background",
+        "LowPriorityIO": true,
+        "AssociatedBundleIdentifiers": [LABEL],
+    ]
+    try FileManager.default.createDirectory(at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let data = try PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0)
+    try data.write(to: plistURL)
+    for attempt in 0..<5 {
+        if run("/bin/launchctl", ["bootstrap", domain, plistURL.path]) == 0 { return }
+        Thread.sleep(forTimeInterval: 0.5 * Double(attempt + 1))
+    }
+    throw ScheduleError(msg: "launchctl bootstrap failed")
+}
+
+func unschedule() {
+    run("/bin/launchctl", ["bootout", "\(domain)/\(LABEL)"])
+    try? FileManager.default.trashItem(at: plistURL, resultingItemURL: nil)
+    try? agent.unregister()
+}
 
 // Галочки «следить за …» / watch checkboxes
 var showWatchBoxes = false
@@ -340,19 +385,12 @@ func runInstaller() {
         return
     }
 
-    // Переезд со старой установки через install.sh (свой plist в ~/Library/LaunchAgents)
     migrateOldFiles()
-    let oldPlist = home.appendingPathComponent("Library/LaunchAgents/\(LABEL).plist")
-    if FileManager.default.fileExists(atPath: oldPlist.path) {
-        run("/bin/launchctl", ["bootout", "gui/\(getuid())/\(LABEL)"])
-        try? FileManager.default.trashItem(at: oldPlist, resultingItemURL: nil)
-    }
 
-    // Перерегистрация при каждом открытии: после обновления/переименования путь мог смениться,
-    // а macOS помнит старую запись / re-register on every open (path may have changed after an update)
-    let wasInstalled = agent.status == .enabled
-    if wasInstalled { try? agent.unregister() }
-    do { try agent.register() } catch {
+    // Расписание переписывается при каждом открытии: после обновления или переноса путь мог смениться
+    // Rewrite the schedule on every open (the app path may have changed after an update)
+    let wasInstalled = FileManager.default.fileExists(atPath: plistURL.path) || agent.status == .enabled
+    do { try schedule() } catch {
         log(L("установка: не удалось поставить на расписание — \(error)", "install: could not schedule — \(error)"))
         alert(title, L("Не удалось поставить сторожа на расписание: ", "Could not schedule the watchdog: ") + error.localizedDescription)
         return
@@ -375,7 +413,7 @@ func runInstaller() {
             NSWorkspace.shared.open(logURL)
         } else if r == 2 {
             showWatchBoxes = false
-            try? agent.unregister()
+            unschedule()
             alert(title, L("Сторож выключен. Теперь перетащите приложение в Корзину и удалите его из «Универсального доступа».",
                            "The watchdog is turned off. Now drag the app to the Trash and remove it from Accessibility."))
         } else if !AXIsProcessTrusted() {
@@ -384,11 +422,6 @@ func runInstaller() {
         return
     }
 
-    if agent.status == .requiresApproval {
-        alert(title, L("macOS просит разрешить фоновую работу. В открывшемся окне «Объекты входа» включите «Сторож синхронизации».",
-                       "macOS asks to allow background activity. In Login Items, turn on “Sync Watchdog”."))
-        SMAppService.openSystemSettingsLoginItems()
-    }
     showWatchBoxes = true
     if AXIsProcessTrusted() {
         alert(title, L("Готово. Сторож будет проверять OneDrive и Dropbox раз в 10 минут.",
@@ -411,12 +444,11 @@ func askAccess() {
 // MARK: - Выбор режима
 
 if CommandLine.arguments.contains("--status") {   // диагностика / diagnostics
-    let st: [SMAppService.Status: String] = [.notRegistered: "notRegistered", .enabled: "enabled",
-                                             .requiresApproval: "requiresApproval", .notFound: "notFound"]
-    if CommandLine.arguments.contains("--register") {
-        do { try agent.register(); print("register: ok") } catch { print("register error: \(error)") }
+    if CommandLine.arguments.contains("--register") {      // поставить расписание без окна / schedule without UI
+        do { try schedule(); print("schedule: ok") } catch { print("schedule error: \(error)") }
     }
-    print("agent: \(st[agent.status] ?? "?")  accessibility: \(AXIsProcessTrusted())  path: \(Bundle.main.bundlePath)")
+    if CommandLine.arguments.contains("--unregister") { unschedule(); print("unscheduled") }
+    print("scheduled: \(isScheduled())  accessibility: \(AXIsProcessTrusted())  path: \(Bundle.main.bundlePath)")
     exit(0)
 }
 

@@ -20,9 +20,13 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp -R Resources/ru.lproj Resources/en.lproj "$APP/Contents/Resources/"
 cp "Resources/$LABEL.plist" "$APP/Contents/Library/LaunchAgents/"
 
-# Подпись «Apple Development», если есть: разрешение переживает обновления. Иначе — временная.
-SIGN=$(security find-identity -v -p codesigning | awk '/Apple Development/ {print $2; exit}')
+# Подпись своим сертификатом «Sync Watchdog» (самоподписанный, в связке ключей «Вход»):
+# разрешение «Универсальный доступ» переживает обновления, а в подписи нет личных данных.
+# Нет такого сертификата — временная подпись (доступ придётся включать после каждой пересборки).
+# Не подписывать сертификатом «Apple Development»: в нём почта владельца.
+SIGN=$(security find-identity -p codesigning | awk '/"Sync Watchdog"/ {print $2; exit}')
 codesign --force --deep --options runtime --timestamp=none --sign "${SIGN:--}" --identifier "$LABEL" "$APP"
+if codesign -dvv "$APP" 2>&1 | grep -qi "@"; then echo "СТОП: в подписи есть адрес почты" >&2; exit 1; fi
 codesign --verify --deep --strict "$APP"
 
 # .dmg: приложение + ярлык на «Программы» — перетащить и готово
