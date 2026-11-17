@@ -1,105 +1,118 @@
-# Sync Watchdog (Сторож синхронизации) for macOS
+# Sync Watchdog for macOS
 
 **English** | [Русский](README.ru.md)
 
-A tiny background app. It makes sure **OneDrive** and **Dropbox** on a Mac are actually syncing files, not just running.
+**Sync Watchdog keeps OneDrive and Dropbox working on your Mac after sleep, closing the lid, or hibernation.**
 
-## Why
+After the Mac wakes up, OneDrive and Dropbox often quietly stop syncing. Sometimes the app quits during a self-update while the Mac is asleep. Sometimes it is still open, but uploading is stuck for hours on "Uploading files (2%)" or "Connecting...". You only find out when a file is missing on another computer.
 
-OneDrive and Dropbox sometimes fail in two ways:
+Sync Watchdog checks both apps every 10 minutes in the background. If an app has quit, it starts it again. If an app is stuck, it restarts it once. If that doesn't help, it shows you a notification.
 
-1. **They quit.** This usually happens during a self-update while the Mac is asleep.
-2. **They hang while still running.** The app is open, but uploading has stopped. The menu shows "Uploading files (2%)" or "Connecting..." for hours.
+---
 
-A "is the process running?" check only catches the first case. The watchdog catches both.
+## Installation
 
-## How it works
+1. Download **`SyncWatchdog-<version>.dmg`** from the [Releases](../../releases/latest) page.
+2. Open the `.dmg` and drag **Sync Watchdog** into the **Applications** folder.
+3. Open **Sync Watchdog** from Applications.
 
-macOS (`launchd`) starts the watchdog every 10 minutes. It runs one check in a fraction of a second and exits. It has no windows and no icons.
+### The first launch: Apple's warning
+
+The app is not signed with a paid Apple Developer ID, so on the first launch macOS will show *"Sync Watchdog" Not Opened* or *Apple could not verify…*. This is expected. To allow it once:
+
+1. Click **Done** (or **OK**) in that message.
+2. Open **System Settings → Privacy & Security**.
+3. Scroll down to the **Security** section. Next to *"Sync Watchdog" was blocked…*, click **Open Anyway**.
+4. Confirm with your password or Touch ID, then click **Open Anyway** again.
+
+macOS asks this only once. After that the app opens normally.
+
+### Two switches
+
+On first launch Sync Watchdog installs itself to run in the background and asks for two permissions:
+
+- **Accessibility** (*System Settings → Privacy & Security → Accessibility*). Turn on **Sync Watchdog**. This lets it read the status text of the OneDrive and Dropbox menu bar icons. Without it, the watchdog can still restart apps that quit, but it cannot see when they hang.
+- **Allow in the Background** (*System Settings → General → Login Items*). Usually it is on by default and macOS just shows a notification. If Sync Watchdog is switched off there, turn it on.
+
+That's it. The watchdog starts by itself after every restart of the Mac.
+
+## Everyday use
+
+Sync Watchdog has no windows and no menu bar icon. To see what it is doing, open it from Applications. A window shows:
+
+- whether it is running;
+- the result of the last check, for example *OneDrive — OK*;
+- **Open log**: the history of everything it has done (launches, restarts, warnings);
+- **Uninstall**: turns the watchdog off. After that, drag the app to the Trash.
+
+## Updating
+
+Download the new `.dmg`, drag the app into Applications, choose **Replace**, and open it once. You don't need to remove the old version first. If macOS asks for Accessibility again, turn the switch back on.
+
+---
+
+## How it works (details)
+
+macOS (`launchd`) starts the watchdog every 10 minutes. It runs one check in a fraction of a second and exits.
 
 | What it sees | What it does |
 |---|---|
 | OneDrive/Dropbox is not running | Launches it in the background |
-| Status "Up to date" (Выполнено… / Обновлено) | Nothing |
+| Status "Up to date" | Nothing |
 | "Uploading…", "Connecting…", "Syncing…", and the text keeps changing | Nothing, work is in progress |
-| The same "Uploading…" / "Connecting…" text for **4 checks in a row (~40 min)** | Checks the internet connection, then restarts **only that client, once**, with a normal quit |
-| Stuck the same way again after the restart | Shows a notification and writes to the log. Leaves the client alone until its status changes |
+| The same "Uploading…" / "Connecting…" text for **4 checks in a row (~40 min)** | Checks the internet connection, then restarts **only that app, once**, with a normal quit |
+| Stuck the same way again after the restart | Shows a notification and writes to the log. Leaves the app alone until its status changes |
 | Paused, offline, or sign-in required | Nothing |
 
-The status comes from the text of the menu bar icon. It is the same tooltip you see when you hover the mouse over it. The watchdog reads it through the Accessibility API, so it needs the Accessibility permission.
+Time while the Mac is asleep is not counted: 40 minutes means 40 minutes awake.
 
-The load is close to zero: two short queries to the icons every 10 minutes. It never scans files and makes no network requests, except one internet check before a restart.
+The status is the text of the menu bar icon, the same tooltip you see when you hover over it. The watchdog reads it through the macOS Accessibility API. The load is close to zero: two short queries every 10 minutes, no file scanning, and no network requests except one internet check before a restart.
 
-## Files on the Mac
+Messages, the log, and the app name follow the system language (English or Russian).
+
+### Files
+
+Everything is stored on your Mac. Nothing is sent anywhere, and no cloud or account is needed.
 
 | What | Where |
 |---|---|
-| App | `~/Applications/Сторож синхронизации.app` |
-| Schedule (every 10 min) | `~/Library/LaunchAgents/com.anton.storozh-sinhronizacii.plist` |
-| **Last check** (overwritten on every run) | `~/Library/Logs/storozh_sinhronizacii_status.txt` |
-| **Action log** (written only when it does something) | `~/Library/Logs/storozh_sinhronizacii.log` |
-| State between runs | `~/Library/Application Support/storozh-sinhronizacii/*.json` |
+| App | `/Applications/Sync Watchdog.app` |
+| Last check (overwritten every run) | `~/Library/Logs/Sync Watchdog/last-check.txt` |
+| Log of actions (written only when it does something) | `~/Library/Logs/Sync Watchdog/journal.log` |
+| State between runs | `~/Library/Application Support/Sync Watchdog/` |
 
-## Installation (new Mac or reinstall)
+The log can also be opened in the **Console** app: *Log Reports → Sync Watchdog*.
 
-You need Apple Command Line Tools: `xcode-select --install`. Full Xcode is not required.
+### Requirements
 
-```bash
-cd path/to/storozh-sinhronizacii
-./install.sh
-```
+macOS 13 Ventura or newer. Apple Silicon and Intel (the Intel build has not been tested).
 
-The script:
+---
 
-1. builds the app from `Sources/main.swift`;
-2. puts it into `~/Applications`;
-3. signs it with an "Apple Development" certificate if one is in the keychain, otherwise with an ad-hoc signature;
-4. installs the launchd job and runs it right away;
-5. shows the system permission prompt.
+## For developers
 
-Then go to **System Settings → Privacy & Security → Accessibility → turn on "Сторож синхронизации"**.
-
-To check that everything works:
+Build from source (needs Apple Command Line Tools, `xcode-select --install`; full Xcode is not required):
 
 ```bash
-cat ~/Library/Logs/storozh_sinhronizacii_status.txt
+./build.sh      # → build/Sync Watchdog.app and dist/SyncWatchdog-<version>.dmg
+./install.sh    # build, copy to /Applications and open
 ```
 
-A line with "НЕТ ДОСТУПА" (no access) means the permission has not been granted.
+`build.sh` signs the app with an "Apple Development" certificate if the keychain has one. Then the Accessibility permission survives rebuilds. Otherwise it uses an ad-hoc signature, and the permission has to be granted again after every rebuild. If the switch is on but access does not work, remove the app from the Accessibility list with "−" and open the app again.
 
-### Rebuilding after changes
+Diagnostics:
 
 ```bash
-./install.sh --no-ask
+"/Applications/Sync Watchdog.app/Contents/MacOS/SyncWatchdog" --status
 ```
 
-If the app is signed with an Apple Development certificate, the permission is kept. With an ad-hoc signature, macOS resets the permission after every rebuild. Remove the entry with "−" in Accessibility, run `./install.sh`, and turn the switch on again. Sometimes the switch is on but access still doesn't work. The same fix applies: remove it with "−" and add it again.
-
-## Testing without a real hang
-
-The `FAKE_<client>` variable overrides the status:
+Test without a real hang (`FAKE_<app>` overrides the status):
 
 ```bash
-B=~/Applications/Сторож\ синхронизации.app/Contents/MacOS/storozh
-for i in 1 2 3 4 5; do FAKE_Dropbox="Dropbox Соединение..." STOROZH_VERBOSE=1 "$B"; done
+B="/Applications/Sync Watchdog.app/Contents/MacOS/SyncWatchdog"
+for i in 1 2 3 4 5; do FAKE_Dropbox="Dropbox Connecting..." STOROZH_VERBOSE=1 "$B"; done
 ```
 
-On the 5th run Dropbox really restarts. Four more runs give the "stuck again" notification. A normal run without `FAKE_` resets the episode. The "last check" file is not overwritten during such a test.
+On the 5th run Dropbox really restarts. Four more runs give the "stuck again" notification. A normal run resets the episode.
 
-## Turn off / uninstall
-
-```bash
-launchctl bootout gui/$(id -u)/com.anton.storozh-sinhronizacii
-```
-
-Then delete the app, the plist, and the Accessibility entry.
-
-## Settings in the code
-
-In `Sources/main.swift`:
-
-- `APPS` — which clients to check;
-- `POROG` — how many checks without change count as a hang;
-- `classify()` — which status words mean "busy", "paused" and "fine" (Russian and English).
-
-Log and "last check" messages are written in Russian. Notifications and the app name follow the system language (Russian or English).
+Settings in `Sources/main.swift`: `APPS` (which apps to check), `POROG` (how many checks without change count as a hang), `classify()` (which status words mean busy, paused, or OK, in Russian and English).
