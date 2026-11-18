@@ -2,17 +2,32 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleIdentifier</key><string>com.anton.storozh-sinhronizacii</string>
-	<key>CFBundleName</key><string>Sync Watchdog</string>
-	<key>CFBundleDisplayName</key><string>Sync Watchdog</string>
-	<key>LSHasLocalizedDisplayName</key><true/>
-	<key>CFBundleExecutable</key><string>SyncWatchdog</string>
-	<key>CFBundlePackageType</key><string>APPL</string>
-	<key>CFBundleShortVersionString</key><string>1.3</string>
-	<key>CFBundleVersion</key><string>4</string>
-	<key>CFBundleDevelopmentRegion</key><string>en</string>
-	<key>CFBundleLocalizations</key><array><string>ru</string><string>en</string></array>
-	<key>LSMinimumSystemVersion</key><string>13.0</string>
-	<key>LSUIElement</key><true/>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Sync Watchdog</string>
+	<key>CFBundleExecutable</key>
+	<string>SyncWatchdog</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.anton.storozh-sinhronizacii</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>ru</string>
+		<string>en</string>
+	</array>
+	<key>CFBundleName</key>
+	<string>Sync Watchdog</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.6</string>
+	<key>CFBundleVersion</key>
+	<string>5</string>
+	<key>LSHasLocalizedDisplayName</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
 </dict>
 </plist>

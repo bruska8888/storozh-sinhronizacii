@@ -1,6 +1,7 @@
 // Сторож синхронизации / Sync Watchdog
 // Запускается launchd раз в 10 минут, делает одну проверку и выходит.
 // 1) OneDrive/Dropbox закрылся — запускает его в фоне.
+// 3) Статус «Ошибка…»/«нужен вход» держится ~30 мин — одно уведомление (с 1.6), без перезапуска.
 // 2) Клиент жив, но статус значка в строке меню («Отправка файлов (2%)», «Соединение...»)
 //    не меняется POROG проверок подряд — один штатный перезапуск.
 //    Снова завис — уведомление, больше не трогает, пока статус не сменится.
@@ -164,14 +165,18 @@ func menuBarStatus(_ app: NSRunningApplication) -> StatusResult {
 
 // MARK: - Разбор статуса
 
-enum Busy { case yes, no, skip }
+enum Busy { case yes, no, skip, attention }
+let POROG_OSHIBKA = 3  // проверок по 10 мин с ошибкой подряд = уведомление / checks with an error before notifying
 
 func classify(_ st: String) -> Busy {
     let s = st.lowercased()
     let idle = ["выполнено", "обновлено", "up to date", "files are up to date", "синхронизировано"]
     if idle.contains(where: s.contains) { return .no }
-    let skip = ["приостановл", "пауз", "нет подключения", "не в сети", "ошибк", "требуется", "войдите",
-                "paused", "offline", "not connected", "error", "sign in", "signed out"]
+    // Ошибка / нужен вход: перезапуск не поможет, но человеку надо сказать (1.6)
+    let attention = ["ошибк", "требуется", "войдите", "error", "sign in", "signed out", "problem", "проблем"]
+    if attention.contains(where: s.contains) { return .attention }
+    let skip = ["приостановл", "пауз", "нет подключения", "не в сети",
+                "paused", "offline", "not connected"]
     if skip.contains(where: s.contains) { return .skip }
     let busy = ["отправк", "скачиван", "загрузк", "соединени", "подключени", "синхрониз", "обработк",
                 "индекс", "подготовк", "проверк",
@@ -230,7 +235,7 @@ func runCheck() {
         }
 
         let busy = classify(st)
-        if busy == .yes && st == s.prev {
+        if (busy == .yes || busy == .attention) && st == s.prev {
             s.cnt += 1
         } else {
             s.cnt = 0
@@ -250,11 +255,20 @@ func runCheck() {
             }
         }
 
+        if busy == .attention && s.cnt >= POROG_OSHIBKA - 1 && !s.warned {
+            log(L("\(app): «\(st)» уже ~\((s.cnt + 1) * 10) мин — уведомил, нужен человек", "\(app): “\(st)” for ~\((s.cnt + 1) * 10) min — notified, needs a human"))
+            notify(L("\(app): нужна помощь", "\(app) needs attention"),
+                   L("\(st). Откройте значок \(app) в строке меню.", "\(st). Open the \(app) menu bar icon."))
+            s.warned = true
+        }
+
         s.prev = st
         saveState(app, s)
         let state = busy == .yes ? (s.cnt > 0 ? L("занят, без изменений \(s.cnt * 10) мин", "busy, unchanged for \(s.cnt * 10) min")
                                               : L("занят, идёт работа", "busy, working"))
-                  : busy == .skip ? L("пауза/нет сети — не трогаю", "paused/offline — leaving alone") : L("в порядке", "OK")
+                  : busy == .skip ? L("пауза/нет сети — не трогаю", "paused/offline — leaving alone")
+                  : busy == .attention ? L("ошибка, нужен человек (\((s.cnt + 1) * 10) мин)", "error, needs a human (\((s.cnt + 1) * 10) min)")
+                  : L("в порядке", "OK")
         report.append("\(app): «\(st)» — \(state)\(s.doneRestart ? L(", уже перезапускал", ", already restarted") : "")\(s.warned ? L(", ПРЕДУПРЕДИЛ", ", WARNED") : "")")
         if env["STOROZH_VERBOSE"] != nil { print("\(app): «\(st)» busy=\(busy) cnt=\(s.cnt) restart=\(s.doneRestart) warned=\(s.warned)") }
     }

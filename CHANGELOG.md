@@ -2,6 +2,9 @@
 
 **English** | [Русский](CHANGELOG.ru.md)
 
+## 1.6 — 2026-11-18
+- Mac: an “Error…” / “sign in required” status is no longer silent. If it lasts ~30 minutes (3 checks), the watchdog sends one macOS notification and logs it. No restart — it does not fix such errors. Paused and offline stay silent.
+
 ## 1.5.2 — 2026-11-18
 - Windows: no stale "Updated to version …" line in the window after an update; update events go to the log.
 
