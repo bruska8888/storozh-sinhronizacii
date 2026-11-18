@@ -2,6 +2,9 @@
 
 **English** | [Русский](CHANGELOG.ru.md)
 
+## 1.5.2 — 2026-11-18
+- Windows: no stale "Updated to version …" line in the window after an update; update events go to the log.
+
 ## 1.5.1 — 2026-11-18
 - Windows: notifications are titled "Sync Watchdog" instead of the file name (it showed "SyncWatchdog.exe.old" right after an update). The exe now has proper file properties (name, version).
 - Auto-update from 1.4.9 → 1.5 tested on a real PC: download, signature check, replacement, notification.
