@@ -7,6 +7,7 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -41,6 +42,81 @@ namespace SyncWatchdog
         public string Name;
         public string ClassName;
         public string Type;
+        public string Where;
+    }
+
+    // Graceful close through the Windows Restart Manager (rstrtmgr.dll), no force flag.
+    internal static class RestartManager
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct UniqueProcess
+        {
+            public int ProcessId;
+            public System.Runtime.InteropServices.ComTypes.FILETIME StartTime;
+        }
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmStartSession(out uint handle, int flags, string key);
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmEndSession(uint handle);
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmRegisterResources(uint handle, uint files, string[] fileNames, uint apps, UniqueProcess[] processes, uint services, string[] serviceNames);
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmShutdown(uint handle, uint flags, IntPtr callback);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BasicInfo
+        {
+            public IntPtr Reserved1, PebBaseAddress, Reserved2a, Reserved2b, UniqueProcessId, InheritedFromUniqueProcessId;
+        }
+        [DllImport("ntdll.dll")]
+        private static extern int NtQueryInformationProcess(IntPtr process, int infoClass, ref BasicInfo info, int size, out int returned);
+
+        internal static int ParentId(Process process)
+        {
+            try
+            {
+                BasicInfo info = new BasicInfo();
+                int returned;
+                if (NtQueryInformationProcess(process.Handle, 0, ref info, Marshal.SizeOf(info), out returned) != 0) return -1;
+                return info.InheritedFromUniqueProcessId.ToInt32();
+            }
+            catch (Exception) { return -1; }
+        }
+
+        // Only root processes (parent is not the same client): registering Chromium helper processes
+        // (crashpad, gpu, renderer) makes RmShutdown refuse to close anything (tested 2026-11-17).
+        public static int Close(List<Process> processes)
+        {
+            HashSet<int> ids = new HashSet<int>();
+            foreach (Process process in processes) ids.Add(process.Id);
+            List<UniqueProcess> list = new List<UniqueProcess>();
+            foreach (Process process in processes)
+            {
+                if (ids.Contains(ParentId(process))) continue;
+                try
+                {
+                    long ft = process.StartTime.ToFileTime();
+                    UniqueProcess item = new UniqueProcess();
+                    item.ProcessId = process.Id;
+                    item.StartTime.dwLowDateTime = (int)(ft & 0xFFFFFFFF);
+                    item.StartTime.dwHighDateTime = (int)(ft >> 32);
+                    list.Add(item);
+                }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
+            }
+            if (list.Count == 0) return 0;
+            uint handle;
+            int result = RmStartSession(out handle, 0, Guid.NewGuid().ToString("N"));
+            if (result != 0) return result;
+            try
+            {
+                result = RmRegisterResources(handle, 0, null, (uint)list.Count, list.ToArray(), 0, null);
+                if (result != 0) return result;
+                return RmShutdown(handle, 0, IntPtr.Zero);
+            }
+            finally { RmEndSession(handle); }
+        }
     }
 
     internal sealed class CommandResult
@@ -73,6 +149,13 @@ namespace SyncWatchdog
         private static int Main(string[] args)
         {
             bool gui = args.Length == 0;
+            // Test hook: STOROZH_LANG=en / ru overrides the Windows UI language (any non-ru language means English).
+            string lang = Environment.GetEnvironmentVariable("STOROZH_LANG");
+            if (!String.IsNullOrEmpty(lang))
+            {
+                try { Thread.CurrentThread.CurrentUICulture = new CultureInfo(lang); }
+                catch (CultureNotFoundException) { }
+            }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             try
@@ -91,15 +174,22 @@ namespace SyncWatchdog
                 }
                 else if (args.Length == 1 && args[0] == "--check")
                 {
+                    Verbose("--check start, session " + SessionId + ", culture " + CultureInfo.CurrentUICulture.Name);
                     using (Mutex mutex = new Mutex(false, "Local\\SyncWatchdog-Check-" + Sid))
                     {
-                        if (!Acquire(mutex)) return 0;
+                        if (!Acquire(mutex)) { Verbose("--check: another check is running, exit"); return 0; }
                         try { RunCheck(); ShowNotifications(); }
                         finally { mutex.ReleaseMutex(); }
                     }
                 }
                 else if (args.Length == 1 && args[0] == "--status") WriteStatus();
                 else if (args.Length == 1 && args[0] == "--dump-tray") DumpTray();
+                else if (args.Length == 1 && args[0] == "--uninstall")
+                {
+                    // Called by Settings → Apps → Installed apps → Uninstall (Windows asks for confirmation itself).
+                    Uninstall();
+                    MessageBox.Show(L("Сторож синхронизации удалён.", "Sync Watchdog has been removed."), L("Сторож синхронизации", "Sync Watchdog"));
+                }
                 else
                 {
                     WriteDiagnostic("status.txt", L("Аргументы: --check, --status, --dump-tray", "Arguments: --check, --status, --dump-tray"));
@@ -211,9 +301,25 @@ namespace SyncWatchdog
         {
             try
             {
-                ProcessStartInfo info = new ProcessStartInfo(path, app == "OneDrive" ? "/background" : "/home");
-                info.UseShellExecute = false;
-                info.CreateNoWindow = true;
+                // "/systemstartup" is what Dropbox itself writes to HKCU\...\Run: starts silently in the tray.
+                string arguments = app == "OneDrive" ? "/background" : "/systemstartup";
+                // Launch through Explorer (Shell.Application), not as our child: the client must not live in the
+                // scheduled task's process tree/job, which Task Scheduler may terminate at the 2-minute limit.
+                Type shellType = Type.GetTypeFromProgID("Shell.Application");
+                object shell = shellType == null ? null : Activator.CreateInstance(shellType);
+                if (shell != null)
+                {
+                    try
+                    {
+                        shellType.InvokeMember("ShellExecute", System.Reflection.BindingFlags.InvokeMethod, null, shell,
+                            new object[] { path, arguments, Path.GetDirectoryName(path), "open", 0 });
+                        return true;
+                    }
+                    catch (Exception ex) { Verbose("Shell.Application: " + ex.Message); }
+                    finally { Marshal.ReleaseComObject(shell); }
+                }
+                ProcessStartInfo info = new ProcessStartInfo(path, arguments);
+                info.UseShellExecute = true;
                 using (Process process = Process.Start(info)) { }
                 return true;
             }
@@ -288,20 +394,16 @@ namespace SyncWatchdog
             if (app == "OneDrive") RunCommand(path, "/shutdown", 5000);
             else
             {
+                // Dropbox is an Electron tray app: WM_CLOSE / taskkill without /F only hides it (tested 2026-11-17).
+                // Restart Manager asks it to quit the way Windows Update does (WM_QUERYENDSESSION + ENDSESSION_CLOSEAPP),
+                // never forcing: without RmForceShutdown a refusing app simply stays running.
                 List<Process> processes = ClientProcesses(app);
                 try
                 {
-                    foreach (Process process in processes)
-                    {
-                        try
-                        {
-                            if (!process.CloseMainWindow())
-                                RunCommand(SystemExe("taskkill.exe"), "/PID " + process.Id.ToString(CultureInfo.InvariantCulture), 3000);
-                        }
-                        catch (InvalidOperationException) { }
-                        catch (System.ComponentModel.Win32Exception ex) { Verbose(ex.Message); }
-                    }
+                    int code = RestartManager.Close(processes);
+                    Verbose("RmShutdown " + app + " => " + code);
                 }
+                catch (Exception ex) { Verbose("RmShutdown: " + ex.Message); }
                 finally { foreach (Process process in processes) process.Dispose(); }
             }
             Stopwatch waiting = Stopwatch.StartNew();
@@ -351,12 +453,26 @@ namespace SyncWatchdog
             return false;
         }
         private enum Busy { No, Yes, Skip }
+        // OneDrive joins several lines, each starting with "OneDrive - <account>":
+        // "OneDrive - Личная Выполнено … OneDrive - Личная Скачивание файлов (0%)". Judge every part; busy wins, then skip.
         private static Busy Classify(string text)
+        {
+            string[] parts = Regex.Split(text ?? "", @"\s+(?=(?:OneDrive|Dropbox)\b)");
+            bool skip = false;
+            foreach (string part in parts)
+            {
+                Busy b = ClassifyPart(part);
+                if (b == Busy.Yes) return Busy.Yes;
+                if (b == Busy.Skip) skip = true;
+            }
+            return skip ? Busy.Skip : Busy.No;
+        }
+        private static Busy ClassifyPart(string text)
         {
             string s = text.ToLowerInvariant();
             if (ContainsAny(s, new string[] { "выполнено", "обновлено", "up to date", "files are up to date", "синхронизировано" })) return Busy.No;
             if (ContainsAny(s, new string[] { "приостановл", "пауз", "нет подключения", "не в сети", "ошибк", "требуется", "войдите", "paused", "offline", "not connected", "error", "sign in", "signed out" })) return Busy.Skip;
-            if (ContainsAny(s, new string[] { "отправк", "скачиван", "загрузк", "соединени", "подключени", "синхрониз", "обработк", "индекс", "подготовк", "проверк", "upload", "download", "connecting", "syncing", "processing", "indexing", "preparing" })) return Busy.Yes;
+            if (ContainsAny(s, new string[] { "отправк", "скачиван", "поиск измен", "looking for changes", "обновление", "updating", "загрузк", "соединени", "подключени", "синхрониз", "обработк", "индекс", "подготовк", "проверк", "upload", "download", "connecting", "syncing", "processing", "indexing", "preparing" })) return Busy.Yes;
             return Busy.No;
         }
 
@@ -385,7 +501,9 @@ namespace SyncWatchdog
                                 AutomationElement.AutomationElementInformation info = element.Current;
                                 string name = Normalize(info.Name);
                                 if (name.Length == 0) continue;
-                                entries.Add(new TrayEntry { Surface = surface, Name = name, ClassName = info.ClassName, Type = info.ControlType.ProgrammaticName });
+                                System.Windows.Rect r = info.BoundingRectangle;
+                                string where = info.IsOffscreen || r.IsEmpty ? "offscreen" : String.Format(CultureInfo.InvariantCulture, "{0:0},{1:0} {2:0}x{3:0}", r.X, r.Y, r.Width, r.Height);
+                                entries.Add(new TrayEntry { Surface = surface, Name = name, ClassName = info.ClassName, Type = info.ControlType.ProgrammaticName, Where = where });
                             }
                             catch (ElementNotAvailableException) { }
                         }
@@ -414,6 +532,9 @@ namespace SyncWatchdog
             return String.Join(" | ", (busy.Count > 0 ? busy : idle).ToArray());
         }
 
+        // The hidden overflow flyout does not exist in UIA until opened, and opening it would flash every 10 min.
+        // Windows 11 does pick up HKCU\Control Panel\NotifyIconSettings\*\IsPromoted=1 live (checked 2026-11-17 on
+        // Win11: the icon came back onto the taskbar within a check after being dragged under "^").
         private static void PromoteIcons(Settings settings)
         {
             if (!settings.AlwaysShowIcons) return;
@@ -437,7 +558,7 @@ namespace SyncWatchdog
                                 if (known && !Object.Equals(key.GetValue("IsPromoted"), 1))
                                 {
                                     key.SetValue("IsPromoted", 1, RegistryValueKind.DWord);
-                                    Log(L("Показ значка в трее включён: ", "Enabled tray icon visibility: ") + exe);
+                                    Log(L("Значок возвращён на панель задач: ", "Tray icon moved back onto the taskbar: ") + exe);
                                 }
                             }
                         }
@@ -447,6 +568,11 @@ namespace SyncWatchdog
             }
             catch (Exception ex) { Verbose("NotifyIconSettings: " + ex.Message); }
         }
+        private static string HiddenIconText()
+        {
+            return L("значок спрятан под стрелку «^» — зависание не видно", "icon is hidden under the “^” arrow — hangs cannot be detected");
+        }
+
 
         private static void RunCheck()
         {
@@ -495,12 +621,12 @@ namespace SyncWatchdog
                         else status = Normalize(status);
                         if (String.IsNullOrEmpty(status))
                         {
-                            if (state.prev != "__nostatus__") Log(app + L(": значок не найден в трее", ": tray icon not found"));
+                            if (state.prev != "__nostatus__") Log(app + ": " + HiddenIconText());
                             // A missing observation is not a changed client text. Keep episode safety flags.
                             state.prev = "__nostatus__";
                             state.cnt = 0;
                             Save(app + ".json", state);
-                            report.Add(app + L(": значок не найден в трее", ": tray icon not found"));
+                            report.Add(app + ": " + HiddenIconText());
                             continue;
                         }
                         Busy busy = Classify(status);
@@ -598,13 +724,96 @@ namespace SyncWatchdog
             }
         }
 
+        // Installer window shown when the exe is run from anywhere except its installed location.
+        private static bool AskInstall(bool upgrade)
+        {
+            using (Form form = new Form())
+            {
+                form.Text = L("Установка сторожа синхронизации ", "Sync Watchdog setup ") + Version;
+                form.FormBorderStyle = FormBorderStyle.FixedDialog;
+                form.MaximizeBox = false;
+                form.MinimizeBox = false;
+                form.StartPosition = FormStartPosition.CenterScreen;
+                form.TopMost = true;
+                form.AutoScaleMode = AutoScaleMode.Dpi;
+                form.AutoSize = true;
+                form.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                form.Font = new Font("Segoe UI", 10);
+                TableLayoutPanel layout = new TableLayoutPanel();
+                layout.AutoSize = true;
+                layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                layout.Padding = new Padding(18);
+                layout.ColumnCount = 1;
+                form.Controls.Add(layout);
+                Label title = new Label();
+                title.AutoSize = true;
+                title.Font = new Font("Segoe UI", 13, FontStyle.Bold);
+                title.Text = upgrade ? L("Обновить сторожа синхронизации?", "Update Sync Watchdog?") : L("Установить сторожа синхронизации?", "Install Sync Watchdog?");
+                layout.Controls.Add(title);
+                Label text = new Label();
+                text.AutoSize = true;
+                text.MaximumSize = new Size(520, 0);
+                text.Margin = new Padding(3, 10, 3, 0);
+                text.Text = L("Сторож раз в 10 минут проверяет OneDrive и Dropbox и перезапускает их, если они закрылись или зависли. Работает в фоне, окон не показывает. Права администратора не нужны.\n\nПосле установки он появится в меню «Пуск», а удалить его можно в «Параметры → Приложения → Установленные приложения».",
+                    "Every 10 minutes the watchdog checks OneDrive and Dropbox and restarts them if they quit or hang. It works in the background without windows. No administrator rights are needed.\n\nAfter setup it appears in the Start menu; uninstall it in Settings → Apps → Installed apps.");
+                layout.Controls.Add(text);
+                FlowLayoutPanel buttons = new FlowLayoutPanel();
+                buttons.AutoSize = true;
+                buttons.Anchor = AnchorStyles.Right;
+                buttons.Margin = new Padding(0, 18, 0, 0);
+                layout.Controls.Add(buttons);
+                Button install = new Button();
+                install.Text = upgrade ? L("Обновить", "Update") : L("Установить", "Install");
+                install.AutoSize = true;
+                install.DialogResult = DialogResult.OK;
+                Button cancel = new Button();
+                cancel.Text = L("Отмена", "Cancel");
+                cancel.AutoSize = true;
+                cancel.DialogResult = DialogResult.Cancel;
+                buttons.Controls.Add(install);
+                buttons.Controls.Add(cancel);
+                form.AcceptButton = install;
+                form.CancelButton = cancel;
+                form.ActiveControl = install;
+                return form.ShowDialog() == DialogResult.OK;
+            }
+        }
+
         private static bool RelaunchInstalledCopy()
         {
             string current = Path.GetFullPath(Application.ExecutablePath);
             if (String.Equals(current, Path.GetFullPath(InstalledExe), StringComparison.OrdinalIgnoreCase)) return false;
+            bool upgrade = File.Exists(InstalledExe);
+            if (!AskInstall(upgrade)) return true;
             Directory.CreateDirectory(InstallDir);
-            File.Copy(current, InstalledExe, true);
+            // Upgrade over a running copy: close its window (if open) and wait out a running --check.
+            foreach (Process other in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(InstalledExe)))
+            {
+                try
+                {
+                    if (other.Id != Process.GetCurrentProcess().Id && other.SessionId == SessionId && other.MainWindowHandle != IntPtr.Zero)
+                        other.CloseMainWindow();
+                }
+                catch (Exception ex) { Verbose("close old window: " + ex.Message); }
+                finally { other.Dispose(); }
+            }
+            for (int attempt = 0; ; attempt++)
+            {
+                try { File.Copy(current, InstalledExe, true); break; }
+                catch (IOException)
+                {
+                    if (attempt >= 30) throw;
+                    Thread.Sleep(500);
+                }
+            }
             Log(L("Установлена копия: ", "Installed copy: ") + InstalledExe);
+            RegisterTask();
+            RegisterApp();
+            MessageBox.Show(
+                (upgrade ? L("Сторож обновлён до версии ", "The watchdog has been updated to version ") : L("Сторож установлен, версия ", "The watchdog is installed, version ")) + Version + ".\n\n"
+                + L("Он уже работает в фоне. Найти его можно в меню «Пуск» («Сторож синхронизации»), удалить — в «Параметры → Приложения → Установленные приложения».\n\nФайл, который вы запускали, больше не нужен — его можно удалить.",
+                    "It is already running in the background. Find it in the Start menu (“Sync Watchdog”); uninstall it in Settings → Apps → Installed apps.\n\nThe file you just ran is no longer needed and can be deleted."),
+                L("Сторож синхронизации", "Sync Watchdog"), MessageBoxButtons.OK, MessageBoxIcon.Information);
             ProcessStartInfo info = new ProcessStartInfo(InstalledExe);
             info.UseShellExecute = true;
             using (Process process = Process.Start(info)) { }
@@ -666,6 +875,75 @@ namespace SyncWatchdog
         {
             return RunCommand(SystemExe("schtasks.exe"), arguments, 15000);
         }
+        internal const string Version = "1.4";
+        private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWatchdog";
+        private static readonly string[] ShortcutNames = { "Сторож синхронизации.lnk", "Sync Watchdog.lnk" };
+        private static string StartMenuDir() { return Environment.GetFolderPath(Environment.SpecialFolder.Programs); }
+
+        // Start menu shortcut + entry in Settings → Apps → Installed apps (per user, no admin rights).
+        private static void RegisterApp()
+        {
+            try
+            {
+                string name = L("Сторож синхронизации", "Sync Watchdog");
+                foreach (string old in ShortcutNames)
+                {
+                    string oldPath = Path.Combine(StartMenuDir(), old);
+                    if (old != name + ".lnk" && File.Exists(oldPath)) File.Delete(oldPath);
+                }
+                Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                object shell = Activator.CreateInstance(shellType);
+                try
+                {
+                    object link = shellType.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell,
+                        new object[] { Path.Combine(StartMenuDir(), name + ".lnk") });
+                    Type linkType = link.GetType();
+                    linkType.InvokeMember("TargetPath", System.Reflection.BindingFlags.SetProperty, null, link, new object[] { InstalledExe });
+                    linkType.InvokeMember("WorkingDirectory", System.Reflection.BindingFlags.SetProperty, null, link, new object[] { InstallDir });
+                    linkType.InvokeMember("Description", System.Reflection.BindingFlags.SetProperty, null, link,
+                        new object[] { L("Следит за OneDrive и Dropbox", "Keeps OneDrive and Dropbox running") });
+                    linkType.InvokeMember("Save", System.Reflection.BindingFlags.InvokeMethod, null, link, null);
+                    Marshal.ReleaseComObject(link);
+                }
+                finally { Marshal.ReleaseComObject(shell); }
+            }
+            catch (Exception ex) { Log(L("Не удалось создать ярлык в «Пуске»: ", "Could not create the Start menu shortcut: ") + ex.Message); }
+
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(UninstallKey))
+            {
+                key.SetValue("DisplayName", L("Сторож синхронизации (Sync Watchdog)", "Sync Watchdog"));
+                key.SetValue("DisplayVersion", Version);
+                key.SetValue("Publisher", "Sync Watchdog");
+                key.SetValue("DisplayIcon", InstalledExe);
+                key.SetValue("InstallLocation", InstallDir);
+                key.SetValue("UninstallString", Quote(InstalledExe) + " --uninstall");
+                key.SetValue("NoModify", 1, RegistryValueKind.DWord);
+                key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
+                key.SetValue("EstimatedSize", (int)Math.Max(1, new FileInfo(InstalledExe).Length / 1024), RegistryValueKind.DWord);
+            }
+        }
+
+        // Full removal: task, shortcut, Installed apps entry, data, and the program folder (deleted by a short
+        // delayed cmd after we exit, because this exe runs from that folder).
+        private static void Uninstall()
+        {
+            TaskCommand("/Delete /F /TN " + Quote(TaskName)); // fine if the task is already gone
+            foreach (string name in ShortcutNames)
+            {
+                try { File.Delete(Path.Combine(StartMenuDir(), name)); } catch (Exception) { }
+            }
+            try { Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, false); } catch (Exception) { }
+            try { if (Directory.Exists(DataDir)) Directory.Delete(DataDir, true); } catch (Exception) { }
+            // Retry for up to ~60 s: the folder is locked until this process (and its message box) is gone.
+            string dir = Quote(InstallDir);
+            ProcessStartInfo info = new ProcessStartInfo(SystemExe("cmd.exe"),
+                "/c for /l %i in (1,1,60) do @(ping 127.0.0.1 -n 2 >nul & rmdir /s /q " + dir + " 2>nul & if not exist " + dir + " exit)");
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            info.WorkingDirectory = Path.GetTempPath();
+            using (Process process = Process.Start(info)) { }
+        }
+
         private static void RegisterTask()
         {
             string xml = Path.Combine(DataDir, "task-" + Guid.NewGuid().ToString("N") + ".xml");
@@ -697,7 +975,6 @@ namespace SyncWatchdog
             text.AppendLine(L("Каталог данных: ", "Data directory: ") + DataDir);
             Settings settings = Load<Settings>("settings.json");
             foreach (string app in Apps) text.AppendLine(app + ": " + (FindClient(app) ?? L("не установлен", "not installed")) + "; watch=" + settings.Watches(app) + "; running=" + IsRunning(app));
-            text.AppendLine("AlwaysShowIcons=" + settings.AlwaysShowIcons);
             text.AppendLine(task.Output);
             if (File.Exists(DataPath("last-check.txt"))) text.AppendLine(File.ReadAllText(DataPath("last-check.txt"), Utf8));
             WriteDiagnostic("status.txt", text.ToString());
@@ -707,7 +984,7 @@ namespace SyncWatchdog
             List<TrayEntry> entries = ReadTray();
             StringBuilder text = new StringBuilder(Stamp() + Environment.NewLine);
             text.AppendLine(L("Панель переполнения не открывалась. Отсутствующие UIA-элементы сюда не попадают.", "Overflow was not opened. Elements not exposed by UIA are absent from this dump."));
-            foreach (TrayEntry entry in entries) text.AppendLine(entry.Surface + "\t" + entry.Type + "\t" + entry.ClassName + "\t" + entry.Name);
+            foreach (TrayEntry entry in entries) text.AppendLine(entry.Surface + "\t" + entry.Type + "\t" + entry.ClassName + "\t" + entry.Where + "\t" + entry.Name);
             text.AppendLine(L("Итого именованных элементов: ", "Named elements: ") + entries.Count);
             WriteDiagnostic("tray-dump.txt", text.ToString());
         }
@@ -727,6 +1004,7 @@ namespace SyncWatchdog
         private static void InstallAndShow()
         {
             RegisterTask();
+            RegisterApp();
             Settings settings = Load<Settings>("settings.json");
             bool oneInstalled = FindClient("OneDrive") != null;
             bool dropInstalled = FindClient("Dropbox") != null;
@@ -736,32 +1014,31 @@ namespace SyncWatchdog
                 form.TopMost = true;
                 form.StartPosition = FormStartPosition.CenterScreen;
                 form.AutoScaleMode = AutoScaleMode.Dpi;
-                form.ClientSize = new Size(660, 480);
-                form.MinimumSize = new Size(620, 480);
+                // Window sizes itself to the content: no empty stretch area.
+                form.AutoSize = true;
+                form.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                form.FormBorderStyle = FormBorderStyle.FixedDialog;
+                form.MaximizeBox = false;
+                form.MinimizeBox = false;
                 form.Font = new Font("Segoe UI", 10);
                 TableLayoutPanel layout = new TableLayoutPanel();
-                layout.Dock = DockStyle.Fill;
+                layout.AutoSize = true;
+                layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
                 layout.Padding = new Padding(18);
                 layout.ColumnCount = 1;
                 layout.RowCount = 7;
-                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-                for (int i = 2; i < 7; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                for (int i = 0; i < 7; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
                 form.Controls.Add(layout);
                 Label intro = new Label();
                 intro.AutoSize = true;
                 intro.MaximumSize = new Size(610, 0);
                 intro.Text = L("Сторож включён и работает в фоне, окон не показывает. Раз в 10 минут он проверяет OneDrive и Dropbox и перезапускает их, если они закрылись или зависли.", "The watchdog is on and works in the background without windows. Every 10 minutes it checks OneDrive and Dropbox and restarts them if they quit or hang.");
                 layout.Controls.Add(intro, 0, 0);
-                TextBox last = new TextBox();
-                last.Multiline = true;
-                last.ReadOnly = true;
-                last.BorderStyle = BorderStyle.None;
-                last.BackColor = form.BackColor;
-                last.ScrollBars = ScrollBars.Vertical;
-                last.Dock = DockStyle.Fill;
+                Label last = new Label();
+                last.AutoSize = true;
+                last.MaximumSize = new Size(610, 0);
                 last.Text = LastCheckText();
-                last.Margin = new Padding(0, 18, 0, 12);
+                last.Margin = new Padding(3, 14, 3, 12);
                 layout.Controls.Add(last, 0, 1);
                 CheckBox one = new CheckBox();
                 one.AutoSize = true;
@@ -775,16 +1052,18 @@ namespace SyncWatchdog
                 drop.Checked = dropInstalled && settings.Dropbox;
                 drop.Text = L("Следить за Dropbox", "Monitor Dropbox") + (dropInstalled ? "" : L(" (не установлен)", " (not installed)"));
                 layout.Controls.Add(drop, 0, 3);
+                Label hint = new Label();
+                hint.AutoSize = true;
+                hint.MaximumSize = new Size(610, 0);
+                hint.Margin = new Padding(3, 12, 3, 0);
+                hint.ForeColor = SystemColors.GrayText;
                 CheckBox promote = new CheckBox();
                 promote.AutoSize = true;
                 promote.Checked = settings.AlwaysShowIcons;
-                promote.Text = L("Всегда показывать значки OneDrive и Dropbox в трее", "Always show OneDrive and Dropbox icons in the tray");
+                promote.Text = L("Всегда показывать значки OneDrive и Dropbox на панели задач", "Always show the OneDrive and Dropbox icons on the taskbar");
                 layout.Controls.Add(promote, 0, 4);
-                Label hint = new Label();
-                hint.AutoSize = true;
-                hint.MaximumSize = new Size(600, 0);
-                hint.ForeColor = SystemColors.GrayText;
-                hint.Text = L("Иначе Windows прячет их под стрелку и сторож не видит зависаний. Снятие галочки не скрывает значки обратно.", "Otherwise Windows hides them under the arrow and the watchdog cannot detect hangs. Unchecking does not hide icons again.");
+                hint.Margin = new Padding(22, 0, 3, 0);
+                hint.Text = L("Иначе Windows прячет их под стрелку «^», и сторож не видит зависаний.", "Otherwise Windows hides them under the “^” arrow and the watchdog cannot see hangs.");
                 layout.Controls.Add(hint, 0, 5);
                 FlowLayoutPanel buttons = new FlowLayoutPanel();
                 buttons.AutoSize = true;
@@ -797,6 +1076,7 @@ namespace SyncWatchdog
                 ok.Click += delegate { form.Close(); };
                 buttons.Controls.Add(ok);
                 form.AcceptButton = ok;
+                form.ActiveControl = ok;
                 Button open = new Button();
                 open.Text = L("Открыть журнал", "Open log");
                 open.AutoSize = true;
@@ -818,11 +1098,11 @@ namespace SyncWatchdog
                 {
                     try
                     {
-                        CommandResult result = TaskCommand("/Delete /F /TN " + Quote(TaskName));
-                        if (result.Code != 0) throw new InvalidOperationException(result.Output);
+                        if (MessageBox.Show(form, L("Удалить сторожа полностью: задачу, ярлык, программу, журнал и настройки?", "Remove the watchdog completely: task, shortcut, program, log and settings?"),
+                            form.Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                        Uninstall();
                         removed = true;
-                        Log(L("Задача удалена, сторож выключен", "Task deleted, watchdog disabled"));
-                        MessageBox.Show(form, L("Сторож выключен. Уже запущенная проверка может ещё завершаться. Теперь удалите папку:\n", "The watchdog is disabled. An active check may still be finishing. Now delete the folder:\n") + InstallDir, form.Text);
+                        MessageBox.Show(form, L("Сторож удалён.", "The watchdog has been removed."), form.Text);
                         form.Close();
                     }
                     catch (Exception ex) { MessageBox.Show(form, ex.Message, form.Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }

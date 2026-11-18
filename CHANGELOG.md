@@ -2,6 +2,13 @@
 
 **English** | [Русский](CHANGELOG.ru.md)
 
+## 1.4 — 2026-11-18
+- **Windows 10/11 version** (`SyncWatchdog-1.4.exe`). Same rules as on the Mac. Setup window with **Install / Update**, no administrator rights; appears in the Start menu and in Settings → Apps → Installed apps, where it can be uninstalled completely.
+- Windows: reads the tray icon tooltip through UI Automation; the **Always show the OneDrive and Dropbox icons on the taskbar** option moves icons back from under the "^" arrow, so hangs stay visible.
+- Windows: graceful restart only — OneDrive `/shutdown`, Dropbox through the Windows Restart Manager.
+- Windows: status words found on a real PC: OneDrive "Looking for changes", "Downloading files", "Processing changes"; Dropbox "Updating files". OneDrive tooltips with several lines are judged line by line.
+- The Mac app is unchanged (still 1.3 inside the `.dmg`).
+
 ## 1.3 — 2026-11-17
 - The app is signed with a neutral "Sync Watchdog" certificate. No personal data in the signature.
 - The schedule is a regular LaunchAgent written by the app, instead of `SMAppService`, which launchd refuses to start without an Apple-issued signature. Now the watchdog really runs on any Mac.
