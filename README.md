@@ -75,7 +75,8 @@ There is no tray icon. Windows Task Scheduler starts the watchdog every 10 minut
 
 ### Updating and uninstalling
 
-- **Update:** run the new `.exe` and click **Update**. Settings and the log are kept.
+- **Automatic updates** (from 1.5): once a day the watchdog asks this repository's [Releases](../../releases/latest) for a newer version. With **Update automatically** on (the default) it installs it by itself and shows a notification; with it off, it only tells you, and you click **Update to …** in the window. Every update is checked against a digital signature built into the program, so a file that was not published by the author is never installed. The window also has **Check for updates**.
+- **Manual update:** run the new `.exe` and click **Update**. Settings and the log are kept.
 - **Uninstall:** *Settings → Apps → Installed apps → Sync Watchdog → Uninstall*, or the button in the window. This removes everything: the scheduled task, the Start menu shortcut, the program, the log and the settings.
 
 ### How it works on Windows

@@ -7,6 +7,7 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
@@ -33,7 +34,22 @@ namespace SyncWatchdog
         public bool OneDrive = true;
         public bool Dropbox = true;
         public bool AlwaysShowIcons = true;
+        public bool AutoUpdate = true;
         public bool Watches(string name) { return name == "OneDrive" ? OneDrive : Dropbox; }
+    }
+
+    public sealed class UpdateState
+    {
+        public string lastCheck = "";
+        public string latest = "";
+        public string notified = "";
+    }
+
+    internal sealed class ReleaseInfo
+    {
+        public Version Version;
+        public string ExeUrl;
+        public string SigUrl;
     }
 
     internal sealed class TrayEntry
@@ -149,6 +165,8 @@ namespace SyncWatchdog
         private static int Main(string[] args)
         {
             bool gui = args.Length == 0;
+            // .NET 4.x defaults to old TLS; GitHub requires TLS 1.2 (3072).
+            ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
             // Test hook: STOROZH_LANG=en / ru overrides the Windows UI language (any non-ru language means English).
             string lang = Environment.GetEnvironmentVariable("STOROZH_LANG");
             if (!String.IsNullOrEmpty(lang))
@@ -691,11 +709,158 @@ namespace SyncWatchdog
             }
             finally
             {
+                try
+                {
+                    Settings updateSettings = Load<Settings>("settings.json");
+                    string updated = CheckForUpdate(updateSettings.AutoUpdate, false);
+                    if (updated != null) report.Add(updated);
+                }
+                catch (Exception ex) { Verbose("update: " + ex.Message); }
                 // Unlike the Mac version, test runs also update last-check, as required by the Windows spec.
                 string test = Environment.GetEnvironmentVariable("FAKE_OneDrive") != null || Environment.GetEnvironmentVariable("FAKE_Dropbox") != null
                     ? L(" [ТЕСТ FAKE]", " [FAKE TEST]") : "";
                 WriteAtomic(DataPath("last-check.txt"), L("Последняя проверка: ", "Last check: ") + Stamp() + test + Environment.NewLine + String.Join(Environment.NewLine, report.ToArray()) + Environment.NewLine);
             }
+        }
+
+        // ---------- Updates from GitHub Releases ----------
+        // Once a day (during a scheduled check) ask GitHub for the latest release. The new exe is accepted only if
+        // its RSA-SHA256 signature (SyncWatchdog-<ver>.exe.sig in the same release) matches the public key below;
+        // the private key is kept in Bitwarden ("Sync Watchdog — ключ подписи релизов"), see windows/sign-release.ps1.
+        private const string LatestReleaseApi = "https://api.github.com/repos/bruska8888/storozh-sinhronizacii/releases/latest";
+        private const string UpdatePublicKey = "<RSAKeyValue><Modulus>sOrH8bW6LdMEuUkT9a/INnECyCMzLrmMgffS/ScG52TlaHBBz86hvnCu5b3m/geWLXQWAGW125bXemwO/iUaAJTTOlVkQPzoJFC/fzQX3+7dbDzLCn5mVWBG52RcfOo4zDb3junbPQKqh2E9iVFe7SgRCN3Cj4zklHIFZWjqa8qq9wyplC+AeGMsJfeEObLfU14IxqCCbmSfzyYMFEqXVxWRohZyGiXy+bZY809lthlfhIitjJj3gTEKcJlFez6jXIhDWKbHI05yiyNqr94fQUJBuW1NViyJTDavFsumOnmHa8yaOY4WMDDGAB7EPSvNrLS3gHm0MqijqH3YnY+4g5AQhifC4Wof3Qx3Z8Z0sNT33Coci6+5VTfHgUdDzr7yds6mn8eJE11ZmFVYw+LmlMpDRsW6b+5ZOuypeetw5fGUCQ8UYaN22T4Di4gwaVwV+PIXFQ9cr4TNXVEdpN9SkNHB2beaBlM2SW30UmqwJ2EzrPWp1fcQVI+CQVFoAZ3x</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>";
+
+        private static byte[] HttpGet(string url, int maxBytes)
+        {
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.UserAgent = "SyncWatchdog/" + Version;
+            request.Accept = url.Contains("api.github.com") ? "application/vnd.github+json" : "application/octet-stream";
+            request.Timeout = 20000;
+            request.ReadWriteTimeout = 20000;
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            using (Stream stream = response.GetResponseStream())
+            using (MemoryStream memory = new MemoryStream())
+            {
+                byte[] buffer = new byte[65536];
+                int read;
+                while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    memory.Write(buffer, 0, read);
+                    if (memory.Length > maxBytes) throw new InvalidDataException("download too large");
+                }
+                return memory.ToArray();
+            }
+        }
+
+        internal static ReleaseInfo LatestRelease()
+        {
+            string json = Encoding.UTF8.GetString(HttpGet(LatestReleaseApi, 1 << 20));
+            Dictionary<string, object> release = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+            ReleaseInfo info = new ReleaseInfo();
+            Dictionary<string, string> urls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            object[] assets = release.ContainsKey("assets") ? release["assets"] as object[] : null;
+            System.Collections.ArrayList list = release.ContainsKey("assets") ? release["assets"] as System.Collections.ArrayList : null;
+            IEnumerable<object> items = assets != null ? (IEnumerable<object>)assets : (list != null ? list.ToArray() : new object[0]);
+            foreach (object item in items)
+            {
+                Dictionary<string, object> asset = item as Dictionary<string, object>;
+                if (asset == null) continue;
+                urls[(string)asset["name"]] = (string)asset["browser_download_url"];
+            }
+            foreach (string name in urls.Keys)
+            {
+                Match match = Regex.Match(name, @"^SyncWatchdog-(\d+(?:\.\d+){1,3})\.exe$", RegexOptions.IgnoreCase);
+                if (!match.Success || !urls.ContainsKey(name + ".sig")) continue;
+                Version version = new Version(match.Groups[1].Value);
+                if (info.Version == null || version > info.Version)
+                {
+                    info.Version = version;
+                    info.ExeUrl = urls[name];
+                    info.SigUrl = urls[name + ".sig"];
+                }
+            }
+            return info.Version == null ? null : info;
+        }
+
+        internal static bool SignatureValid(byte[] data, byte[] signature)
+        {
+            using (RSACryptoServiceProvider rsa = new RSACryptoServiceProvider())
+            {
+                rsa.PersistKeyInCsp = false;
+                rsa.FromXmlString(UpdatePublicKey);
+                using (SHA256Managed sha = new SHA256Managed())
+                    return rsa.VerifyHash(sha.ComputeHash(data), CryptoConfig.MapNameToOID("SHA256"), signature);
+            }
+        }
+
+        private static Version CurrentVersion() { return new Version(Version); }
+
+        // Downloads, verifies and installs the release. The running exe cannot be overwritten, but it can be renamed:
+        // SyncWatchdog.exe -> SyncWatchdog.exe.old (removed on the next run), then the new file takes its place.
+        internal static void InstallUpdate(ReleaseInfo release)
+        {
+            byte[] exe = HttpGet(release.ExeUrl, 20 << 20);
+            byte[] sig = Convert.FromBase64String(Encoding.ASCII.GetString(HttpGet(release.SigUrl, 1 << 16)).Trim());
+            if (!SignatureValid(exe, sig))
+            {
+                Log(L("Обновление ", "Update ") + release.Version + L(" не прошло проверку подписи — НЕ установлено", " failed the signature check — NOT installed"));
+                throw new InvalidDataException(L("Подпись обновления неверна, обновление не установлено.", "The update signature is invalid; the update was not installed."));
+            }
+            string old = InstalledExe + ".old";
+            if (File.Exists(old)) File.Delete(old);
+            File.Move(InstalledExe, old);
+            try { File.WriteAllBytes(InstalledExe, exe); }
+            catch { File.Move(old, InstalledExe); throw; }
+            RegisterApp(release.Version.ToString());
+            Log(L("Сторож обновлён: ", "Watchdog updated: ") + Version + " → " + release.Version);
+        }
+
+        // Returns a line for last-check when something happened; null otherwise.
+        internal static string CheckForUpdate(bool auto, bool force)
+        {
+            try { if (File.Exists(InstalledExe + ".old")) File.Delete(InstalledExe + ".old"); } catch (Exception) { }
+            if (!String.Equals(Path.GetFullPath(Application.ExecutablePath), Path.GetFullPath(InstalledExe), StringComparison.OrdinalIgnoreCase)) return null;
+            UpdateState state = Load<UpdateState>("update.json");
+            DateTime last;
+            if (!force && DateTime.TryParse(state.lastCheck, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out last)
+                && (DateTime.UtcNow - last).TotalHours < 20) return null;
+            state.lastCheck = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+            ReleaseInfo release = null;
+            try { release = LatestRelease(); }
+            catch (Exception ex) { Verbose("update check: " + ex.Message); }
+            if (release == null || release.Version <= CurrentVersion())
+            {
+                state.latest = "";
+                Save("update.json", state);
+                return null;
+            }
+            state.latest = release.Version.ToString();
+            string message;
+            if (auto)
+            {
+                Save("update.json", state); // a failed install is retried tomorrow, not every 10 minutes
+                InstallUpdate(release);
+                Notifications.Add(new string[] { L("Сторож синхронизации обновлён", "Sync Watchdog updated"), L("Установлена версия ", "Installed version ") + release.Version, "info" });
+                message = L("Обновлён до версии ", "Updated to version ") + release.Version;
+            }
+            else
+            {
+                if (state.notified != state.latest)
+                {
+                    Notifications.Add(new string[] { L("Есть новая версия сторожа: ", "New Sync Watchdog version: ") + release.Version,
+                        L("Откройте «Сторож синхронизации» в меню «Пуск» и нажмите «Обновить».", "Open Sync Watchdog from the Start menu and click Update."), "info" });
+                    state.notified = state.latest;
+                }
+                message = L("Доступна новая версия ", "New version available: ") + release.Version;
+            }
+            Save("update.json", state);
+            return message;
+        }
+
+        internal static Icon AppIcon()
+        {
+            try { return Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application; }
+            catch (Exception) { return SystemIcons.Application; }
         }
 
         private static void ShowNotifications()
@@ -704,12 +869,13 @@ namespace SyncWatchdog
             using (NotifyIcon icon = new NotifyIcon())
             using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer())
             {
-                icon.Icon = SystemIcons.Warning;
+                icon.Icon = AppIcon();
                 icon.Text = "Sync Watchdog";
                 icon.Visible = true;
                 List<string> titles = new List<string>();
                 List<string> bodies = new List<string>();
-                foreach (string[] item in Notifications) { titles.Add(item[0]); bodies.Add(item[1]); }
+                bool warning = false;
+                foreach (string[] item in Notifications) { titles.Add(item[0]); bodies.Add(item[1]); if (item.Length < 3 || item[2] != "info") warning = true; }
                 string title = String.Join("; ", titles.ToArray());
                 string body = String.Join(Environment.NewLine, bodies.ToArray());
                 if (title.Length > 63) title = title.Substring(0, 60) + "...";
@@ -717,7 +883,7 @@ namespace SyncWatchdog
                 timer.Interval = 11000;
                 timer.Tick += delegate { timer.Stop(); Application.ExitThread(); };
                 // Keep a message loop alive: disposing immediately would discard the balloon.
-                icon.ShowBalloonTip(10000, title, body, ToolTipIcon.Warning);
+                icon.ShowBalloonTip(10000, title, body, warning ? ToolTipIcon.Warning : ToolTipIcon.Info);
                 timer.Start();
                 Application.Run();
                 icon.Visible = false;
@@ -730,6 +896,7 @@ namespace SyncWatchdog
             using (Form form = new Form())
             {
                 form.Text = L("Установка сторожа синхронизации ", "Sync Watchdog setup ") + Version;
+                form.Icon = AppIcon();
                 form.FormBorderStyle = FormBorderStyle.FixedDialog;
                 form.MaximizeBox = false;
                 form.MinimizeBox = false;
@@ -875,13 +1042,14 @@ namespace SyncWatchdog
         {
             return RunCommand(SystemExe("schtasks.exe"), arguments, 15000);
         }
-        internal const string Version = "1.4";
+        internal const string Version = "1.5";
         private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWatchdog";
         private static readonly string[] ShortcutNames = { "Сторож синхронизации.lnk", "Sync Watchdog.lnk" };
         private static string StartMenuDir() { return Environment.GetFolderPath(Environment.SpecialFolder.Programs); }
 
         // Start menu shortcut + entry in Settings → Apps → Installed apps (per user, no admin rights).
-        private static void RegisterApp()
+        private static void RegisterApp() { RegisterApp(Version); }
+        private static void RegisterApp(string version)
         {
             try
             {
@@ -912,7 +1080,7 @@ namespace SyncWatchdog
             using (RegistryKey key = Registry.CurrentUser.CreateSubKey(UninstallKey))
             {
                 key.SetValue("DisplayName", L("Сторож синхронизации (Sync Watchdog)", "Sync Watchdog"));
-                key.SetValue("DisplayVersion", Version);
+                key.SetValue("DisplayVersion", version);
                 key.SetValue("Publisher", "Sync Watchdog");
                 key.SetValue("DisplayIcon", InstalledExe);
                 key.SetValue("InstallLocation", InstallDir);
@@ -1026,8 +1194,8 @@ namespace SyncWatchdog
                 layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
                 layout.Padding = new Padding(18);
                 layout.ColumnCount = 1;
-                layout.RowCount = 7;
-                for (int i = 0; i < 7; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                layout.RowCount = 9;
+                for (int i = 0; i < 9; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
                 form.Controls.Add(layout);
                 Label intro = new Label();
                 intro.AutoSize = true;
@@ -1065,11 +1233,68 @@ namespace SyncWatchdog
                 hint.Margin = new Padding(22, 0, 3, 0);
                 hint.Text = L("Иначе Windows прячет их под стрелку «^», и сторож не видит зависаний.", "Otherwise Windows hides them under the “^” arrow and the watchdog cannot see hangs.");
                 layout.Controls.Add(hint, 0, 5);
+                CheckBox autoUpdate = new CheckBox();
+                autoUpdate.AutoSize = true;
+                autoUpdate.Margin = new Padding(3, 10, 3, 3);
+                autoUpdate.Checked = settings.AutoUpdate;
+                autoUpdate.Text = L("Обновлять автоматически", "Update automatically");
+                layout.Controls.Add(autoUpdate, 0, 6);
+                UpdateState updateState = Load<UpdateState>("update.json");
+                Version pending = null;
+                try { if (updateState.latest.Length > 0 && new Version(updateState.latest) > CurrentVersion()) pending = new Version(updateState.latest); }
+                catch (Exception) { }
+                FlowLayoutPanel versionRow = new FlowLayoutPanel();
+                versionRow.AutoSize = true;
+                versionRow.Margin = new Padding(0, 4, 0, 0);
+                Label versionLabel = new Label();
+                versionLabel.AutoSize = true;
+                versionLabel.Margin = new Padding(3, 7, 10, 0);
+                versionLabel.ForeColor = SystemColors.GrayText;
+                versionLabel.Text = L("Версия ", "Version ") + Version + (pending != null ? L(" · доступна ", " · available: ") + pending : "");
+                Button updateButton = new Button();
+                updateButton.AutoSize = true;
+                updateButton.Text = pending != null ? L("Обновить до ", "Update to ") + pending : L("Проверить обновления", "Check for updates");
+                versionRow.Controls.Add(versionLabel);
+                versionRow.Controls.Add(updateButton);
+                layout.Controls.Add(versionRow, 0, 7);
                 FlowLayoutPanel buttons = new FlowLayoutPanel();
                 buttons.AutoSize = true;
                 buttons.Dock = DockStyle.Fill;
                 buttons.Margin = new Padding(0, 18, 0, 0);
-                layout.Controls.Add(buttons, 0, 6);
+                layout.Controls.Add(buttons, 0, 8);
+                form.Icon = AppIcon();
+                updateButton.Click += delegate
+                {
+                    try
+                    {
+                        Cursor.Current = Cursors.WaitCursor;
+                        ReleaseInfo release = LatestRelease();
+                        Cursor.Current = Cursors.Default;
+                        if (release == null || release.Version <= CurrentVersion())
+                        {
+                            versionLabel.Text = L("Версия ", "Version ") + Version;
+                            updateButton.Text = L("Проверить обновления", "Check for updates");
+                            MessageBox.Show(form, L("У вас последняя версия.", "You have the latest version."), form.Text);
+                            return;
+                        }
+                        if (MessageBox.Show(form, L("Доступна версия ", "Version ") + release.Version + L(". Обновить сейчас?", " is available. Update now?"),
+                            form.Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                        Cursor.Current = Cursors.WaitCursor;
+                        InstallUpdate(release);
+                        Cursor.Current = Cursors.Default;
+                        UpdateState done = Load<UpdateState>("update.json");
+                        done.latest = "";
+                        Save("update.json", done);
+                        MessageBox.Show(form, L("Сторож обновлён до версии ", "The watchdog has been updated to version ") + release.Version + ".", form.Text);
+                        using (Process process = Process.Start(new ProcessStartInfo(InstalledExe) { UseShellExecute = true })) { }
+                        form.Close();
+                    }
+                    catch (Exception ex)
+                    {
+                        Cursor.Current = Cursors.Default;
+                        MessageBox.Show(form, L("Не удалось обновиться: ", "Update failed: ") + ex.Message, form.Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                };
                 Button ok = new Button();
                 ok.Text = "OK";
                 ok.AutoSize = true;
@@ -1114,6 +1339,7 @@ namespace SyncWatchdog
                     if (oneInstalled) settings.OneDrive = one.Checked;
                     if (dropInstalled) settings.Dropbox = drop.Checked;
                     settings.AlwaysShowIcons = promote.Checked;
+                    settings.AutoUpdate = autoUpdate.Checked;
                     Save("settings.json", settings);
                     PromoteIcons(settings);
                 };
@@ -1125,6 +1351,7 @@ namespace SyncWatchdog
                 one.CheckedChanged += changed;
                 drop.CheckedChanged += changed;
                 promote.CheckedChanged += changed;
+                autoUpdate.CheckedChanged += changed;
                 form.FormClosing += delegate(object sender, FormClosingEventArgs e)
                 {
                     if (removed) return;

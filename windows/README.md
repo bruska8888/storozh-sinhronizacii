@@ -12,6 +12,14 @@ windows\build.cmd
 
 Uses the C# compiler that ships with .NET Framework 4.x (`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`); no SDK and no admin rights. The source is one file, `src/SyncWatchdog.cs`, C# 5 syntax (this compiler is old: no `$"..."`, `?.`, `nameof`). Output: `windows\SyncWatchdog.exe` (`/target:winexe`, no console window). For a release, rename it to `SyncWatchdog-<version>.exe`; the version is the `Version` constant in the source.
 
+## Release and auto-update
+
+1. Bump `Version` in `src/SyncWatchdog.cs`, run `build.cmd`, copy the result to `SyncWatchdog-<version>.exe`.
+2. Sign it: `powershell -ExecutionPolicy Bypass -File windows\sign-release.ps1 -Exe SyncWatchdog-<version>.exe -FromBitwarden` (or `-KeyFile`). This writes `SyncWatchdog-<version>.exe.sig`.
+3. Attach **both** files to the GitHub release (and the current `.dmg`). Installed copies pick it up within a day; an exe without a valid `.sig` is ignored.
+
+The public key is the `UpdatePublicKey` constant; the private key lives only in the owner's password manager. Icon: `icon/icon.svg` → `icon/make-icon.ps1` → `icon/SyncWatchdog.ico` (used by `build.cmd`).
+
 ## Modes
 
 | Run | What happens |
@@ -49,6 +57,8 @@ set FAKE_Dropbox=
 Инструкция для пользователя — раздел Windows в основном [README.ru.md](../README.ru.md#windows-1011).
 
 **Сборка:** `windows\build.cmd`. Компилятор C# из .NET Framework 4.x, который уже есть в Windows; SDK и права администратора не нужны. Исходник — один файл `src/SyncWatchdog.cs`, синтаксис C# 5. Результат — `windows\SyncWatchdog.exe`; для релиза переименовать в `SyncWatchdog-<версия>.exe`, версия — константа `Version` в исходнике.
+
+**Релиз и автообновление:** поднять `Version` в исходнике → `build.cmd` → скопировать в `SyncWatchdog-<версия>.exe` → подписать `sign-release.ps1 -FromBitwarden` (секретный ключ — запись Bitwarden «Sync Watchdog — ключ подписи релизов») → приложить к релизу и `.exe`, и `.exe.sig`. Без верной подписи сторож обновление не ставит.
 
 **Режимы:** без аргументов не из папки установки — окно установки/обновления; без аргументов из установленной копии — окно состояния; `--check` — одна проверка (так запускает Планировщик); `--status`, `--dump-tray` — диагностика в `%LOCALAPPDATA%\Sync Watchdog\`; `--uninstall` — полное удаление. Переменные: `FAKE_OneDrive` / `FAKE_Dropbox` подменяют статус (перезапуск при этом настоящий), `STOROZH_VERBOSE=1` — подробный `verbose.txt`, `STOROZH_LANG=en|ru` — язык окна.
 

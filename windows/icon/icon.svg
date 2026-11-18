@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Sync Watchdog icon: cloud with a restart arrow and an "OK" check badge. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b8cff"/>
+      <stop offset="1" stop-color="#1257d6"/>
+    </linearGradient>
+    <linearGradient id="ok" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34c759"/>
+      <stop offset="1" stop-color="#1f9e45"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+  <!-- cloud -->
+  <g fill="#ffffff">
+    <circle cx="92" cy="138" r="40"/>
+    <circle cx="140" cy="110" r="54"/>
+    <circle cx="186" cy="146" r="36"/>
+    <rect x="52" y="138" width="170" height="44" rx="22"/>
+  </g>
+  <!-- restart arrow inside the cloud -->
+  <g fill="none" stroke="#1257d6" stroke-width="15" stroke-linecap="round">
+    <path d="M 160 136 A 30 30 0 1 1 146 110"/>
+  </g>
+  <path d="M 136 92 L 170 104 L 142 128 Z" fill="#1257d6"/>
+  <!-- OK badge -->
+  <circle cx="190" cy="192" r="44" fill="#ffffff"/>
+  <circle cx="190" cy="192" r="36" fill="url(#ok)"/>
+  <path d="M 172 193 L 185 206 L 209 180" fill="none" stroke="#ffffff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

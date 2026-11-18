@@ -2,6 +2,12 @@
 
 **English** | [Русский](CHANGELOG.ru.md)
 
+## 1.5 — 2026-11-18
+- Windows: **automatic updates** from GitHub Releases, once a day. **Update automatically** checkbox (on by default); when off, a notification and an **Update to …** button. **Check for updates** button in the window.
+- Windows: every update must carry a valid RSA-SHA256 signature (`.sig` next to the `.exe`); unsigned or altered files are rejected.
+- Windows: app icon (file, Start menu, Installed apps, window, notifications).
+- The repository is public under the MIT license.
+
 ## 1.4 — 2026-11-18
 - **Windows 10/11 version** (`SyncWatchdog-1.4.exe`). Same rules as on the Mac. Setup window with **Install / Update**, no administrator rights; appears in the Start menu and in Settings → Apps → Installed apps, where it can be uninstalled completely.
 - Windows: reads the tray icon tooltip through UI Automation; the **Always show the OneDrive and Dropbox icons on the taskbar** option moves icons back from under the "^" arrow, so hangs stay visible.
