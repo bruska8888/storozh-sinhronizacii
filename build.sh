@@ -10,10 +10,10 @@ VER=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/In
 APP="build/$NAME.app"
 
 rm -rf build && mkdir -p build dist
-swiftc -O -target arm64-apple-macos13 -o build/bin-arm64 Sources/main.swift
+swiftc -O -target arm64-apple-macos13 -o build/bin-arm64 Sources/main.swift Sources/update.swift
 # Intel: CLT печатает «libswiftCompatibilityPacks.a … missing arch x86_64» — безвредно,
 # программа ни одного символа из этой библиотеки не использует (проверено nm, 17.11.2026).
-swiftc -O -target x86_64-apple-macos13 -o build/bin-x86_64 Sources/main.swift 2> >(grep -v libswiftCompatibilityPacks >&2)
+swiftc -O -target x86_64-apple-macos13 -o build/bin-x86_64 Sources/main.swift Sources/update.swift 2> >(grep -v libswiftCompatibilityPacks >&2)
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Library/LaunchAgents"
 lipo -create -output "$APP/Contents/MacOS/SyncWatchdog" build/bin-arm64 build/bin-x86_64
 cp Resources/Info.plist "$APP/Contents/Info.plist"
@@ -36,4 +36,8 @@ ln -s /Applications "$STAGE/Applications"
 DMG="dist/SyncWatchdog-$VER.dmg"
 rm -f "$DMG"
 hdiutil create -quiet -volname "$NAME $VER" -srcfolder "$STAGE" -format UDZO "$DMG"
-echo "Готово / Done: $APP  |  $DMG"
+# .zip для автообновления (подпись — sign-release-mac.py) / zip for the auto-updater
+ZIP="dist/SyncWatchdog-mac-$VER.zip"
+rm -f "$ZIP" "$ZIP.sig"
+ditto -c -k --keepParent "$APP" "$ZIP"
+echo "Готово / Done: $APP  |  $DMG  |  $ZIP"

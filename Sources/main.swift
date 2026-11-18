@@ -1,6 +1,7 @@
 // Сторож синхронизации / Sync Watchdog
 // Запускается launchd раз в 10 минут, делает одну проверку и выходит.
 // 1) OneDrive/Dropbox закрылся — запускает его в фоне.
+// 4) Раз в сутки — новая версия из GitHub Releases (SyncWatchdog-mac-X.zip + .sig), подпись RSA проверяется (с 1.7).
 // 3) Статус «Ошибка…»/«нужен вход» держится ~30 мин — одно уведомление (с 1.6), без перезапуска.
 // 2) Клиент жив, но статус значка в строке меню («Отправка файлов (2%)», «Соединение...»)
 //    не меняется POROG проверок подряд — один штатный перезапуск.
@@ -278,6 +279,7 @@ func runCheck() {
     let text = L("Последняя проверка: ", "Last check: ") + "\(df.string(from: Date()))\n" + report.joined(separator: "\n") + "\n"
     if env["FAKE_OneDrive"] == nil && env["FAKE_Dropbox"] == nil {
         try? text.write(to: statusURL, atomically: true, encoding: .utf8)
+        dailyUpdateCheck()   // раз в сутки: новая версия на GitHub (1.7) / daily update check
     }
 }
 
@@ -344,16 +346,20 @@ func watchBoxesView() -> (NSView, () -> Void) {
         b.isEnabled = inst
         stack.addArrangedSubview(b); boxes.append((app, b))
     }
+    let upd = NSButton(checkboxWithTitle: L("Обновлять автоматически", "Update automatically"), target: nil, action: nil)
+    upd.state = autoUpdateEnabled() ? .on : .off
     let hint = NSTextField(wrappingLabelWithString: L("Снимите галочку, если держите программу выключенной специально — сторож не будет её запускать.",
                                                       "Uncheck an app you keep closed on purpose — the watchdog will not launch it."))
     hint.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize); hint.textColor = .secondaryLabelColor
     hint.preferredMaxLayoutWidth = 260
     stack.addArrangedSubview(hint)
+    stack.addArrangedSubview(upd)
     stack.frame = NSRect(x: 0, y: 0, width: 270, height: stack.fittingSize.height)
     let save = {
         var w = loadWatch()
         for (app, b) in boxes where b.isEnabled { w[app] = (b.state == .on) }
         saveWatch(w)
+        setAutoUpdate(upd.state == .on)
     }
     return (stack, save)
 }
@@ -417,8 +423,8 @@ func runInstaller() {
         showWatchBoxes = true
         let r = alert(title, L("Сторож включён и работает в фоне, окон не показывает. Раз в 10 минут он проверяет OneDrive и Dropbox и перезапускает их, если они закрылись или зависли.",
                                "The watchdog is on and works in the background without windows. Every 10 minutes it checks OneDrive and Dropbox and restarts them if they quit or hang.")
-                      + access + "\n\n" + lastCheckText(),
-                      ["OK", L("Открыть журнал", "Open log"), L("Удалить сторожа", "Uninstall")])
+                      + access + "\n\n" + lastCheckText() + "\n\n" + L("Версия ", "Version ") + currentAppVersion(),
+                      ["OK", L("Открыть журнал", "Open log"), L("Проверить обновления", "Check for updates"), L("Удалить сторожа", "Uninstall")])
         if r == 1 {
             if !FileManager.default.fileExists(atPath: logURL.path) {
                 try? L("Журнал пуст: сторож пока ничего не делал.\n", "The log is empty: the watchdog has not done anything yet.\n")
@@ -426,6 +432,9 @@ func runInstaller() {
             }
             NSWorkspace.shared.open(logURL)
         } else if r == 2 {
+            showWatchBoxes = false
+            alert(title, checkUpdateInteractive())
+        } else if r == 3 {
             showWatchBoxes = false
             unschedule()
             alert(title, L("Сторож выключен. Теперь перетащите приложение в Корзину и удалите его из «Универсального доступа».",
@@ -462,6 +471,7 @@ if CommandLine.arguments.contains("--status") {   // диагностика / di
         do { try schedule(); print("schedule: ok") } catch { print("schedule error: \(error)") }
     }
     if CommandLine.arguments.contains("--unregister") { unschedule(); print("unscheduled") }
+    if CommandLine.arguments.contains("--update-now") { print(checkUpdateInteractive()) }   // проверка обновления без окна
     print("scheduled: \(isScheduled())  accessibility: \(AXIsProcessTrusted())  path: \(Bundle.main.bundlePath)")
     exit(0)
 }
