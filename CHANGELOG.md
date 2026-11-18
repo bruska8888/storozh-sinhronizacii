@@ -2,6 +2,10 @@
 
 **English** | [Русский](CHANGELOG.ru.md)
 
+## 1.5.1 — 2026-11-18
+- Windows: notifications are titled "Sync Watchdog" instead of the file name (it showed "SyncWatchdog.exe.old" right after an update). The exe now has proper file properties (name, version).
+- Auto-update from 1.4.9 → 1.5 tested on a real PC: download, signature check, replacement, notification.
+
 ## 1.5 — 2026-11-18
 - Windows: **automatic updates** from GitHub Releases, once a day. **Update automatically** checkbox (on by default); when off, a notification and an **Update to …** button. **Check for updates** button in the window.
 - Windows: every update must carry a valid RSA-SHA256 signature (`.sig` next to the `.exe`); unsigned or altered files are rejected.

@@ -19,6 +19,15 @@ using System.Windows.Forms;
 using System.Xml;
 using Microsoft.Win32;
 
+// File properties: Windows shows FileDescription as the notification source and in Task Manager,
+// instead of the exe file name (which is "SyncWatchdog.exe.old" for a moment during an update).
+[assembly: System.Reflection.AssemblyTitle("Sync Watchdog")]
+[assembly: System.Reflection.AssemblyProduct("Sync Watchdog")]
+[assembly: System.Reflection.AssemblyDescription("Keeps OneDrive and Dropbox running")]
+[assembly: System.Reflection.AssemblyCopyright("MIT License")]
+[assembly: System.Reflection.AssemblyVersion("1.5.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.5.1.0")]
+
 namespace SyncWatchdog
 {
     public sealed class ClientState
@@ -1042,7 +1051,7 @@ namespace SyncWatchdog
         {
             return RunCommand(SystemExe("schtasks.exe"), arguments, 15000);
         }
-        internal const string Version = "1.5";
+        internal const string Version = "1.5.1"; // keep in sync with AssemblyVersion at the top
         private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWatchdog";
         private static readonly string[] ShortcutNames = { "Сторож синхронизации.lnk", "Sync Watchdog.lnk" };
         private static string StartMenuDir() { return Environment.GetFolderPath(Environment.SpecialFolder.Programs); }

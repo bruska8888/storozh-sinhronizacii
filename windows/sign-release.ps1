@@ -10,6 +10,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if ($FromBitwarden) {
+    # bw must be unlocked (BW_SESSION set). Some setups keep bw data in a separate folder; use it if present.
+    $alt = Join-Path $env:USERPROFILE '.bitwarden-cli-mcp'
+    if (-not $env:BITWARDENCLI_APPDATA_DIR -and (Test-Path $alt)) { $env:BITWARDENCLI_APPDATA_DIR = $alt }
     $items = bw list items --search 'Sync Watchdog' | ConvertFrom-Json
     $item = $items | Where-Object { $_.notes -like '<RSAKeyValue>*<D>*' } | Select-Object -First 1
     if (-not $item) { throw 'Bitwarden item with the signing key not found (is bw unlocked?)' }
