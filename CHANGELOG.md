@@ -2,6 +2,9 @@
 
 **English** | [Русский](CHANGELOG.ru.md)
 
+## 1.7.1 — 2026-11-18
+- Mac: test release — used to verify the 1.7 → 1.7.1 auto-update on a live Mac.
+
 ## 1.7 — 2026-11-18
 - Mac: **auto-update**, like on Windows. Once a day the watchdog checks GitHub releases (`SyncWatchdog-mac-<version>.zip` + `.zip.sig`), verifies the RSA-SHA256 signature with the same key as the Windows version, then the app code signature (signer “Sync Watchdog”) and version, and replaces itself in Applications with a safety copy. A tampered or unsigned archive is never installed.
 - **“Update automatically”** checkbox (on) and a **“Check for updates”** button; with the box off — one notification per new version.
