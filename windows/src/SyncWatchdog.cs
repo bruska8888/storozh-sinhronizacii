@@ -25,8 +25,8 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyProduct("Sync Watchdog")]
 [assembly: System.Reflection.AssemblyDescription("Keeps OneDrive and Dropbox running")]
 [assembly: System.Reflection.AssemblyCopyright("MIT License")]
-[assembly: System.Reflection.AssemblyVersion("1.5.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.5.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.5.2.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.5.2.0")]
 
 namespace SyncWatchdog
 {
@@ -850,7 +850,7 @@ namespace SyncWatchdog
                 Save("update.json", state); // a failed install is retried tomorrow, not every 10 minutes
                 InstallUpdate(release);
                 Notifications.Add(new string[] { L("Сторож синхронизации обновлён", "Sync Watchdog updated"), L("Установлена версия ", "Installed version ") + release.Version, "info" });
-                message = L("Обновлён до версии ", "Updated to version ") + release.Version;
+                message = null; // the journal and the notification record it; last-check describes the clients only
             }
             else
             {
@@ -1051,7 +1051,7 @@ namespace SyncWatchdog
         {
             return RunCommand(SystemExe("schtasks.exe"), arguments, 15000);
         }
-        internal const string Version = "1.5.1"; // keep in sync with AssemblyVersion at the top
+        internal const string Version = "1.5.2"; // keep in sync with AssemblyVersion at the top
         private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWatchdog";
         private static readonly string[] ShortcutNames = { "Сторож синхронизации.lnk", "Sync Watchdog.lnk" };
         private static string StartMenuDir() { return Environment.GetFolderPath(Environment.SpecialFolder.Programs); }
@@ -1173,6 +1173,13 @@ namespace SyncWatchdog
             foreach (string line in File.ReadAllLines(DataPath("last-check.txt"), Utf8))
             {
                 if (line.Length == 0) continue;
+                // Update lines are stale once this version is installed (e.g. right after "Update to …").
+                Match update = Regex.Match(line, @"^(?:Обновлён до версии|Updated to version|Доступна новая версия|New version available:) ([\d.]+)");
+                if (update.Success)
+                {
+                    try { if (new Version(update.Groups[1].Value) <= CurrentVersion()) continue; }
+                    catch (Exception) { }
+                }
                 string clean = Regex.Replace(line, ": «.*» — ", " — ");
                 lines.Add(line.StartsWith("Last check:", StringComparison.Ordinal) || line.StartsWith("Последняя проверка:", StringComparison.Ordinal) ? clean : "• " + clean);
             }
