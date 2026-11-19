@@ -143,7 +143,7 @@ macOS 13 Ventura или новее. Apple Silicon и Intel (версия для 
 Сборка из исходника. Нужны Command Line Tools от Apple (`xcode-select --install`), полный Xcode не нужен:
 
 ```bash
-./build.sh      # → build/Sync Watchdog.app и dist/SyncWatchdog-<версия>.dmg
+./build.sh      # → dist/SyncWatchdog-<версия>.dmg и .zip (временные файлы удаляются)
 ./install.sh    # собрать, положить в /Applications и открыть
 ```
 

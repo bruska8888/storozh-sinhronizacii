@@ -143,7 +143,7 @@ macOS 13 Ventura or newer. Apple Silicon and Intel (the Intel build is tested un
 Build from source (needs Apple Command Line Tools, `xcode-select --install`; full Xcode is not required):
 
 ```bash
-./build.sh      # → build/Sync Watchdog.app and dist/SyncWatchdog-<version>.dmg
+./build.sh      # → dist/SyncWatchdog-<version>.dmg and .zip (temporary files are removed)
 ./install.sh    # build, copy to /Applications and open
 ```
 
