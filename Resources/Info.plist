@@ -8,6 +8,8 @@
 	<string>Sync Watchdog</string>
 	<key>CFBundleExecutable</key>
 	<string>SyncWatchdog</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.anton.storozh-sinhronizacii</string>
 	<key>CFBundleLocalizations</key>
@@ -20,9 +22,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.7.1</string>
+	<string>1.7.2</string>
 	<key>CFBundleVersion</key>
-	<string>7</string>
+	<string>8</string>
 	<key>LSHasLocalizedDisplayName</key>
 	<true/>
 	<key>LSMinimumSystemVersion</key>

@@ -4,7 +4,8 @@
 set -e
 cd "${0:A:h}"
 ./build.sh
+VER=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist)
 APP="/Applications/Sync Watchdog.app"
 rm -rf "$APP"
-cp -R "build/Sync Watchdog.app" "$APP"
+ditto -x -k "dist/SyncWatchdog-mac-$VER.zip" /Applications
 open "$APP"
