@@ -2,6 +2,11 @@
 
 **English** | [Русский](CHANGELOG.ru.md)
 
+## 1.8 (Mac) / 1.6.0 (Windows) — 2026-11-19
+- If OneDrive or Dropbox shows a status the watchdog does not recognize (for example after a client update), it now sends one notification instead of silently ignoring it.
+- If the client's icon is hidden for ~30 minutes, one notification explains that hangs cannot be detected (relaunching a closed client still works).
+- Before restarting a client whose status has not changed for ~40 minutes, the watchdog checks whether it is still transferring data (a large file on a slow connection). If it is, the restart is postponed, for up to an hour.
+
 ## 1.7.2 — 2026-11-19
 - Mac: the app now has its own icon (same as on Windows).
 - Minor build and install improvements.

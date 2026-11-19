@@ -25,8 +25,8 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyProduct("Sync Watchdog")]
 [assembly: System.Reflection.AssemblyDescription("Keeps OneDrive and Dropbox running")]
 [assembly: System.Reflection.AssemblyCopyright("MIT License")]
-[assembly: System.Reflection.AssemblyVersion("1.5.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.5.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.6.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.6.0.0")]
 
 namespace SyncWatchdog
 {
@@ -36,6 +36,8 @@ namespace SyncWatchdog
         public int cnt = 0;
         public bool doneRestart = false;
         public bool warned = false;
+        public int netWaits = 0;      // restart postponed because the client was doing I/O (1.6)
+        public int noIcon = 0;        // checks in a row without a tray icon (1.6)
     }
 
     public sealed class Settings
@@ -479,28 +481,98 @@ namespace SyncWatchdog
             foreach (string word in words) if (text.Contains(word)) return true;
             return false;
         }
-        private enum Busy { No, Yes, Skip }
+        private enum Busy { No, Yes, Skip, Unknown }
         // OneDrive joins several lines, each starting with "OneDrive - <account>":
         // "OneDrive - Личная Выполнено … OneDrive - Личная Скачивание файлов (0%)". Judge every part; busy wins, then skip.
+        // Unknown = no part matched any known word (a client update changed its wording) — never restarted, reported once (1.6).
         private static Busy Classify(string text)
         {
             string[] parts = Regex.Split(text ?? "", @"\s+(?=(?:OneDrive|Dropbox)\b)");
-            bool skip = false;
+            bool skip = false, known = false;
             foreach (string part in parts)
             {
                 Busy b = ClassifyPart(part);
                 if (b == Busy.Yes) return Busy.Yes;
                 if (b == Busy.Skip) skip = true;
+                if (b != Busy.Unknown) known = true;
             }
-            return skip ? Busy.Skip : Busy.No;
+            return skip ? Busy.Skip : (known ? Busy.No : Busy.Unknown);
         }
         private static Busy ClassifyPart(string text)
         {
             string s = text.ToLowerInvariant();
             if (ContainsAny(s, new string[] { "выполнено", "обновлено", "up to date", "files are up to date", "синхронизировано" })) return Busy.No;
+            // Only the app name (and version) — the client is starting up
+            if (Regex.IsMatch(s.Trim(), @"^(onedrive|dropbox)(\s+[\d.]+)?$")) return Busy.No;
             if (ContainsAny(s, new string[] { "приостановл", "пауз", "нет подключения", "не в сети", "ошибк", "требуется", "войдите", "paused", "offline", "not connected", "error", "sign in", "signed out" })) return Busy.Skip;
             if (ContainsAny(s, new string[] { "отправк", "скачиван", "поиск измен", "looking for changes", "обновление", "updating", "загрузк", "соединени", "подключени", "синхрониз", "обработк", "индекс", "подготовк", "проверк", "upload", "download", "connecting", "syncing", "processing", "indexing", "preparing" })) return Busy.Yes;
-            return Busy.No;
+            return Busy.Unknown;
+        }
+
+        // Unknown statuses already reported (digits → #, so "(37%)" does not create new entries)
+        private static string UnknownKey(string app, string status) { return app + ": " + Regex.Replace(status, @"\d", "#"); }
+        private static bool UnknownReported(string key)
+        {
+            string path = DataPath("unknown-statuses.txt");
+            return File.Exists(path) && Array.IndexOf(File.ReadAllLines(path, Utf8), key) >= 0;
+        }
+        private static void MarkUnknownReported(string key)
+        {
+            string path = DataPath("unknown-statuses.txt");
+            List<string> lines = File.Exists(path) ? new List<string>(File.ReadAllLines(path, Utf8)) : new List<string>();
+            lines.Add(key);
+            if (lines.Count > 50) lines.RemoveRange(0, lines.Count - 50);
+            WriteAtomic(path, String.Join(Environment.NewLine, lines.ToArray()) + Environment.NewLine);
+        }
+
+        // ---------- Is the client doing anything right now? (1.6) ----------
+        // Second confirmation of a hang. Windows has no per-process network counters without admin rights, so use the
+        // process I/O counters (disk + network): an uploading client reads the file and sends it; a hung one is idle.
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IoCounters
+        {
+            public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount;
+            public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+        }
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetProcessIoCounters(IntPtr process, out IoCounters counters);
+        private const int NetPauseMs = 30000;              // pause between the two samples
+        private const long NetMinBytes = 1024 * 1024;      // this much I/O during the pause = "working"
+        private const int NetMaxWaits = 6;                 // postpone a restart for at most ~1 h
+
+        private static Dictionary<int, long> ClientIo(string app)
+        {
+            Dictionary<int, long> result = new Dictionary<int, long>();
+            foreach (Process process in ClientProcesses(app))
+            {
+                try
+                {
+                    IoCounters c;
+                    if (GetProcessIoCounters(process.Handle, out c))
+                        result[process.Id] = (long)(c.ReadTransferCount + c.WriteTransferCount + c.OtherTransferCount);
+                }
+                catch (Exception ex) { Verbose("io: " + ex.Message); }
+                finally { process.Dispose(); }
+            }
+            return result;
+        }
+        // true = working, false = idle, null = could not tell
+        private static bool? ClientActive(string app)
+        {
+            string fake = Environment.GetEnvironmentVariable("FAKE_NET_" + app);
+            if (fake != null) return fake == "1";
+            Dictionary<int, long> a = ClientIo(app);
+            if (a.Count == 0) return null;
+            System.Threading.Thread.Sleep(NetPauseMs);
+            Dictionary<int, long> b = ClientIo(app);
+            long moved = 0;
+            foreach (KeyValuePair<int, long> kv in b)
+            {
+                long before;
+                if (a.TryGetValue(kv.Key, out before)) moved += Math.Max(0, kv.Value - before);
+            }
+            Verbose(app + ": I/O over " + (NetPauseMs / 1000) + " s = " + moved + " bytes");
+            return moved >= NetMinBytes;
         }
 
         private static List<TrayEntry> ReadTray()
@@ -646,9 +718,18 @@ namespace SyncWatchdog
                             status = TrayStatus(tray, app);
                         }
                         else status = Normalize(status);
-                        if (String.IsNullOrEmpty(status))
+                        if (String.IsNullOrEmpty(status) || status == "__noicon__")
                         {
-                            if (state.prev != "__nostatus__") Log(app + ": " + HiddenIconText());
+                            if (state.prev != "__nostatus__") { Log(app + ": " + HiddenIconText()); state.noIcon = 0; }
+                            else state.noIcon++;
+                            // ~30 min without an icon: say once that hangs are not visible (1.6)
+                            if (state.noIcon == 2)
+                            {
+                                Log(app + L(": значка нет ~30 мин — уведомил: зависания не видны", ": no icon for ~30 min — notified: hangs cannot be detected"));
+                                Notifications.Add(new string[] { L("Сторож не видит значок ", "Sync Watchdog cannot see the icon of ") + app,
+                                    L("Если " + app + " закроется, сторож его запустит, но зависание не заметит. Включите «Всегда показывать значки» в окне сторожа.",
+                                      "If " + app + " quits it will be relaunched, but a hang will go unnoticed. Turn on “Always show icons” in the watchdog window.") });
+                            }
                             // A missing observation is not a changed client text. Keep episode safety flags.
                             state.prev = "__nostatus__";
                             state.cnt = 0;
@@ -657,11 +738,24 @@ namespace SyncWatchdog
                             continue;
                         }
                         Busy busy = Classify(status);
+                        if (busy == Busy.Unknown && status == state.prev)
+                        {
+                            // Same unknown text two checks in a row — report once per text (1.6)
+                            string key = UnknownKey(app, status);
+                            if (!UnknownReported(key))
+                            {
+                                Log(app + L(": незнакомый статус «", ": unknown status “") + status + L("» — не понимаю его, зависание с ним не замечу", "” — cannot tell whether it is a hang"));
+                                Notifications.Add(new string[] { L("Сторож: незнакомый статус ", "Sync Watchdog: unknown status of ") + app,
+                                    "«" + status + "». " + L("Возможно, " + app + " обновился. Пока статус непонятен, зависание не ловится — проверьте обновление сторожа.",
+                                                            app + " may have been updated. Hangs are not detected with this status — check for a watchdog update.") });
+                                MarkUnknownReported(key);
+                            }
+                        }
                         if (busy == Busy.Yes && status == state.prev) state.cnt = Math.Min(state.cnt + 1, 100000);
                         else
                         {
                             state.cnt = 0;
-                            if (status != state.prev) { state.doneRestart = false; state.warned = false; }
+                            if (status != state.prev) { state.doneRestart = false; state.warned = false; state.netWaits = 0; }
                         }
                         string action = "";
                         if (busy == Busy.Yes && state.cnt >= Threshold && !(state.doneRestart && state.warned))
@@ -673,8 +767,20 @@ namespace SyncWatchdog
                             {
                                 if (!internet.HasValue) internet = InternetOK();
                                 if (!internet.Value) action = L(", нет интернета — не перезапускаю", ", no internet — not restarting");
+                                // Text is stuck but the client is working (big file, slow link) — wait, at most ~1 h (1.6).
+                                // The 30-s sample must fit the task's 2-minute limit together with a restart.
+                                else if (!state.doneRestart && state.netWaits < NetMaxWaits && CheckClock.Elapsed.TotalSeconds >= 40)
+                                    action = L(", действие отложено до следующей проверки", ", action deferred until next check");
+                                else if (!state.doneRestart && state.netWaits < NetMaxWaits && ClientActive(app) == true)
+                                {
+                                    if (state.netWaits == 0)
+                                        Log(app + L(": статус «", ": status “") + status + L("» стоит ~40 мин, но программа работает — жду", "” unchanged ~40 min, but the client is working — waiting"));
+                                    state.netWaits++;
+                                    action = L(", программа работает — жду", ", client is working — waiting");
+                                }
                                 else if (!state.doneRestart)
                                 {
+                                    state.netWaits = 0;
                                     // Persist the attempt BEFORE shutdown: interruption must not cause a restart loop.
                                     state.prev = status;
                                     state.doneRestart = true;
@@ -698,7 +804,8 @@ namespace SyncWatchdog
                         Save(app + ".json", state);
                         string summary = busy == Busy.Yes
                             ? (state.cnt > 0 ? L("занят, без изменений ~", "busy, unchanged for ~") + (state.cnt * 10) + L(" мин", " min") : L("занят, идёт работа", "busy, working"))
-                            : (busy == Busy.Skip ? L("пауза/нет сети — не трогаю", "paused/offline — leaving alone") : L("в порядке", "OK"));
+                            : (busy == Busy.Skip ? L("пауза/нет сети — не трогаю", "paused/offline — leaving alone")
+                            : (busy == Busy.Unknown ? L("незнакомый статус — зависание не вижу", "unknown status — cannot detect hangs") : L("в порядке", "OK")));
                         report.Add(app + ": «" + status + "» — " + summary + action
                             + (state.doneRestart ? L(", попытка перезапуска уже была", ", restart already attempted") : "")
                             + (state.warned ? L(", ПРЕДУПРЕДИЛ", ", WARNED") : ""));
@@ -1051,7 +1158,7 @@ namespace SyncWatchdog
         {
             return RunCommand(SystemExe("schtasks.exe"), arguments, 15000);
         }
-        internal const string Version = "1.5.2"; // keep in sync with AssemblyVersion at the top
+        internal const string Version = "1.6.0"; // keep in sync with AssemblyVersion at the top
         private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWatchdog";
         private static readonly string[] ShortcutNames = { "Сторож синхронизации.lnk", "Sync Watchdog.lnk" };
         private static string StartMenuDir() { return Environment.GetFolderPath(Environment.SpecialFolder.Programs); }
