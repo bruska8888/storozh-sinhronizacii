@@ -146,6 +146,12 @@ namespace SyncWatchdog
         }
     }
 
+    // Alert window appears without taking focus from what the user is typing.
+    internal sealed class AlertForm : Form
+    {
+        protected override bool ShowWithoutActivation { get { return true; } }
+    }
+
     internal sealed class CommandResult
     {
         public int Code = -1;
@@ -207,12 +213,13 @@ namespace SyncWatchdog
                     using (Mutex mutex = new Mutex(false, "Local\\SyncWatchdog-Check-" + Sid))
                     {
                         if (!Acquire(mutex)) { Verbose("--check: another check is running, exit"); return 0; }
-                        try { RunCheck(); ShowNotifications(); }
+                        try { RunCheck(); QueueAlerts(); ShowNotifications(); }
                         finally { mutex.ReleaseMutex(); }
                     }
                 }
                 else if (args.Length == 1 && args[0] == "--status") WriteStatus();
                 else if (args.Length == 1 && args[0] == "--dump-tray") DumpTray();
+                else if (args.Length == 1 && args[0] == "--alert") ShowAlertWindow();
                 else if (args.Length == 1 && args[0] == "--uninstall")
                 {
                     // Called by Settings → Apps → Installed apps → Uninstall (Windows asks for confirmation itself).
@@ -1003,6 +1010,142 @@ namespace SyncWatchdog
                 timer.Start();
                 Application.Run();
                 icon.Visible = false;
+            }
+        }
+
+        // ---------- Sticky alert window (1.6.0, Anton 22.11.2026) ----------
+        // A balloon disappears after ~10 s; someone away from the PC never sees it. Each warning is also appended
+        // to alerts.txt, and a separate "--alert" process shows it in a small top-most window in the corner until
+        // the user closes it. New warnings are added to the open window. The check itself does not wait for it.
+        private static void QueueAlerts()
+        {
+            if (Notifications.Count == 0) return;
+            StringBuilder text = new StringBuilder();
+            foreach (string[] item in Notifications)
+                text.Append(DateTime.Now.ToString("dd.MM HH:mm", CultureInfo.InvariantCulture) + " — " + item[0] + "\t" + item[1].Replace("\r", " ").Replace("\n", " ") + Environment.NewLine);
+            File.AppendAllText(DataPath("alerts.txt"), text.ToString(), Utf8);
+            try
+            {
+                using (Mutex probe = new Mutex(false, AlertMutexName))
+                {
+                    if (!Acquire(probe)) return; // window already open: it re-reads the file itself
+                    probe.ReleaseMutex();
+                }
+                ProcessStartInfo start = new ProcessStartInfo(Process.GetCurrentProcess().MainModule.FileName, "--alert");
+                start.UseShellExecute = false;
+                Process.Start(start).Dispose();
+            }
+            catch (Exception ex) { Verbose("alert window: " + ex.Message); }
+        }
+        private static string AlertMutexName { get { return "Local\\SyncWatchdog-Alert-" + Sid; } }
+
+        private static string AlertText()
+        {
+            string path = DataPath("alerts.txt");
+            if (!File.Exists(path)) return "";
+            StringBuilder text = new StringBuilder();
+            foreach (string line in File.ReadAllLines(path, Utf8))
+            {
+                if (line.Trim().Length == 0) continue;
+                string[] parts = line.Split('\t');
+                if (text.Length > 0) text.Append(Environment.NewLine + Environment.NewLine);
+                text.Append(parts[0]);
+                if (parts.Length > 1) text.Append(Environment.NewLine + parts[1]);
+            }
+            return text.ToString();
+        }
+
+        private static void ShowAlertWindow()
+        {
+            using (Mutex mutex = new Mutex(false, AlertMutexName))
+            {
+                if (!Acquire(mutex)) return;
+                try
+                {
+                    string shown = AlertText();
+                    if (shown.Length == 0) return;
+                    using (Form form = new AlertForm())
+                    using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer())
+                    {
+                        form.Text = L("Сторож синхронизации — нужен взгляд", "Sync Watchdog — needs attention");
+                        form.Icon = AppIcon();
+                        form.FormBorderStyle = FormBorderStyle.FixedDialog;
+                        form.MaximizeBox = false;
+                        form.MinimizeBox = false;
+                        form.ShowInTaskbar = true;
+                        form.TopMost = true;
+                        form.StartPosition = FormStartPosition.Manual;
+                        form.AutoScaleMode = AutoScaleMode.Dpi;
+                        form.ClientSize = new Size(440, 230);
+                        form.Font = SystemFonts.MessageBoxFont;
+
+                        TextBox box = new TextBox();
+                        box.Multiline = true;
+                        box.ReadOnly = true;
+                        box.ScrollBars = ScrollBars.Vertical;
+                        box.BorderStyle = BorderStyle.None;
+                        box.BackColor = SystemColors.Window;
+                        box.Dock = DockStyle.Fill;
+                        box.Text = shown;
+                        box.TabStop = false;
+
+                        Panel bottom = new Panel();
+                        bottom.Dock = DockStyle.Bottom;
+                        bottom.Height = 44;
+                        Button ok = new Button();
+                        ok.Text = L("Понятно", "OK");
+                        ok.AutoSize = true;
+                        ok.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
+                        ok.Click += delegate { form.Close(); };
+                        LinkLabel journal = new LinkLabel();
+                        journal.Text = L("Открыть журнал", "Open the log");
+                        journal.AutoSize = true;
+                        journal.Location = new Point(10, 14);
+                        journal.LinkClicked += delegate
+                        {
+                            try { Process.Start(new ProcessStartInfo(DataPath("journal.log")) { UseShellExecute = true }); } catch (Exception) { }
+                        };
+                        bottom.Controls.Add(ok);
+                        bottom.Controls.Add(journal);
+                        bottom.Layout += delegate { ok.Location = new Point(bottom.ClientSize.Width - ok.Width - 10, (bottom.ClientSize.Height - ok.Height) / 2); };
+
+                        Panel inner = new Panel();
+                        inner.Dock = DockStyle.Fill;
+                        inner.Padding = new Padding(12, 12, 12, 0);
+                        inner.BackColor = SystemColors.Window;
+                        inner.Controls.Add(box);
+                        form.Controls.Add(inner);
+                        form.Controls.Add(bottom);
+                        form.AcceptButton = ok;
+                        form.CancelButton = ok;
+
+                        form.Load += delegate
+                        {
+                            Rectangle area = Screen.PrimaryScreen.WorkingArea;
+                            form.Location = new Point(area.Right - form.Width - 12, area.Bottom - form.Height - 12);
+                        };
+                        // Pick up warnings added by later checks while the window is open.
+                        timer.Interval = 5000;
+                        timer.Tick += delegate
+                        {
+                            try
+                            {
+                                string now = AlertText();
+                                if (now.Length > 0 && now != shown) { shown = now; box.Text = now; box.SelectionStart = box.TextLength; box.ScrollToCaret(); }
+                            }
+                            catch (IOException) { }
+                        };
+                        timer.Start();
+                        Application.Run(form);
+                    }
+                    // Closed by the user: everything shown has been seen. Keep lines added in the last moment.
+                    try
+                    {
+                        if (AlertText() == shown) File.Delete(DataPath("alerts.txt"));
+                    }
+                    catch (IOException) { }
+                }
+                finally { mutex.ReleaseMutex(); }
             }
         }
 

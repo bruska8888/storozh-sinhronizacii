@@ -87,6 +87,7 @@ The rules are the same as on the Mac (see the table below): a client that quit i
 - Restart is always graceful, never forced: OneDrive gets `/shutdown`; Dropbox is asked to quit through the Windows Restart Manager, the way Windows Update closes apps. If an app refuses to quit, it is left as is.
 - Time while the PC sleeps is not counted: the watchdog counts checks, not minutes, and missed runs are not replayed after waking up.
 - Windows, the log and notifications follow the system language: Russian on a Russian Windows, English otherwise.
+- A pop-up notification disappears after ~10 seconds, so every warning also opens a small window in the bottom-right corner that stays until you close it (from 1.6.0). Later warnings are added to the same window, and it does not steal focus.
 
 | What | Where |
 |---|---|
